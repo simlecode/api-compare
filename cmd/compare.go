@@ -71,7 +71,7 @@ func (cmgr *compareMgr) start() {
 				cmgr.currTS = ts
 			}
 			if err := cmgr.compareAPI(); err != nil {
-				fmt.Printf("compare api error: %v", err)
+				fmt.Printf("compare api error: %v\n", err)
 			}
 		}
 	}
