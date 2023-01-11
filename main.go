@@ -20,7 +20,7 @@ func main() {
 			},
 			&cli.StringFlag{
 				Name:  "lotus-token",
-				Value: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJBbGxvdyI6WyJyZWFkIiwid3JpdGUiLCJzaWduIiwiYWRtaW4iXX0.WWgcDC3V5t4LLI9Eo9IlcSZgjLFgc52VbcxQBAsCH7g",
+				Value: "",
 				Usage: "lotus token",
 			},
 			&cli.StringFlag{
@@ -30,7 +30,7 @@ func main() {
 			},
 			&cli.StringFlag{
 				Name:  "venus-token",
-				Value: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYW1lIjoiYWRtaW4iLCJwZXJtIjoiYWRtaW4iLCJleHQiOiIifQ.6MY0durlQKAl6dNn4_MVRTcn1Bd34Ip_3aGXgEJVV2k",
+				Value: "",
 				Usage: "venus token",
 			},
 			&cli.IntFlag{

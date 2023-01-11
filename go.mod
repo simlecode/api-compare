@@ -7,7 +7,7 @@ require (
 	github.com/filecoin-project/go-jsonrpc v0.1.9
 	github.com/filecoin-project/go-state-types v0.10.0-alpha-8
 	github.com/filecoin-project/lotus v1.18.0
-	github.com/filecoin-project/venus v1.9.0-rc1.0.20230104093247-878b1157f475
+	github.com/filecoin-project/venus v1.9.0-rc1.0.20230111064351-dc5b2eeae446
 	github.com/ipfs/go-cid v0.3.2
 	github.com/stretchr/testify v1.8.0
 	github.com/urfave/cli/v2 v2.16.3
