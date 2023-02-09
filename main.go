@@ -37,6 +37,10 @@ func main() {
 				Name:  "start-height",
 				Usage: "Start comparing the height of the API",
 			},
+			&cli.IntFlag{
+				Name:  "concurrency",
+				Value: 2,
+			},
 		},
 		Action: cmd.Run,
 	}

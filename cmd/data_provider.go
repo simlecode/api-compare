@@ -28,7 +28,7 @@ type dataProvider struct {
 	ctx context.Context
 	api v1.FullNode
 
-	ts *types.TipSet
+	currTS *types.TipSet
 
 	dataSet *dataSet
 }
@@ -45,13 +45,13 @@ func (dp *dataProvider) reset(ts *types.TipSet) error {
 	if ts.Len() == 0 {
 		return fmt.Errorf("ts is empty")
 	}
-	dp.ts = ts
+	dp.currTS = ts
 
 	return dp.generateData()
 }
 
 func (dp *dataProvider) generateData() error {
-	blkMsgs, err := dp.api.ChainGetBlockMessages(dp.ctx, dp.ts.Blocks()[0].Cid())
+	blkMsgs, err := dp.api.ChainGetBlockMessages(dp.ctx, dp.currTS.Blocks()[0].Cid())
 	if err != nil {
 		return err
 	}
@@ -105,6 +105,7 @@ func (dp *dataProvider) getMsg() *types.Message {
 	return nil
 }
 
+// nolint
 func (dp *dataProvider) getSenders() []address.Address {
 	return dp.dataSet.senders
 }
@@ -117,6 +118,7 @@ func (dp *dataProvider) getSender() address.Address {
 	return address.Undef
 }
 
+// nolint
 func (dp *dataProvider) getIDAddress() address.Address {
 	if len(dp.dataSet.ids) > 0 {
 		return dp.dataSet.ids[0]
@@ -130,7 +132,7 @@ func (dp *dataProvider) defaultMiner() address.Address {
 }
 
 func (dp *dataProvider) getBlkOptByHeight() (string, error) {
-	d, err := types.EthUint64(dp.ts.Height()).MarshalJSON()
+	d, err := types.EthUint64(dp.currTS.Height()).MarshalJSON()
 	if err != nil {
 		return "", err
 	}
@@ -139,17 +141,17 @@ func (dp *dataProvider) getBlkOptByHeight() (string, error) {
 }
 
 func (dp *dataProvider) getBlockHash() (types.EthHash, ethtypes.EthHash, error) {
-	c, err := dp.ts.Key().Cid()
+	c, err := dp.currTS.Key().Cid()
 	if err != nil {
 		return emptyEthHash, emptyLEthHash, err
 	}
 
-	blkHash, err := types.NewEthHashFromCid(c)
+	blkHash, err := types.EthHashFromCid(c)
 	if err != nil {
 		return emptyEthHash, emptyLEthHash, err
 	}
 
-	blkHash2, err := ethtypes.NewEthHashFromCid(c)
+	blkHash2, err := ethtypes.EthHashFromCid(c)
 	if err != nil {
 		return emptyEthHash, emptyLEthHash, err
 	}
@@ -161,11 +163,11 @@ func (dp *dataProvider) getTxHash() (types.EthHash, ethtypes.EthHash, error) {
 	msg := dp.getMsg()
 
 	if msg != nil {
-		msgHash, err := types.NewEthHashFromCid(msg.Cid())
+		msgHash, err := types.EthHashFromCid(msg.Cid())
 		if err != nil {
 			return emptyEthHash, emptyLEthHash, err
 		}
-		msgHash2, err := ethtypes.NewEthHashFromCid(msg.Cid())
+		msgHash2, err := ethtypes.EthHashFromCid(msg.Cid())
 
 		return msgHash, msgHash2, err
 	}

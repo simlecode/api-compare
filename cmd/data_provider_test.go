@@ -12,7 +12,7 @@ func TestGetBlockHash(t *testing.T) {
 	var ts types.TipSet
 	testutil.Provide(t, &ts)
 	dp := &dataProvider{
-		ts: &ts,
+		currTS: &ts,
 	}
 	blkHash, blkHash2, err := dp.getBlockHash()
 

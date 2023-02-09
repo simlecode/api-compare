@@ -15,6 +15,7 @@ import (
 	"github.com/filecoin-project/lotus/chain/types/ethtypes"
 	"github.com/filecoin-project/venus/venus-shared/api"
 	"github.com/filecoin-project/venus/venus-shared/types"
+	"github.com/ipfs/go-cid"
 )
 
 func newLotusFullNodeRPCV1(ctx context.Context, url, token string) (lapi.FullNode, jsonrpc.ClientCloser, error) {
@@ -32,7 +33,43 @@ func newLotusFullNodeRPCV1(ctx context.Context, url, token string) (lapi.FullNod
 }
 
 func toLoutsTipsetKey(key types.TipSetKey) ltypes.TipSetKey {
+	if key.IsEmpty() {
+		return ltypes.EmptyTSK
+	}
 	return ltypes.NewTipSetKey(key.Cids()...)
+}
+
+func toLotusMsg(msg *types.Message) *ltypes.Message {
+	return &ltypes.Message{
+		Version:    msg.Version,
+		To:         msg.To,
+		From:       msg.From,
+		Nonce:      msg.Nonce,
+		Value:      msg.Value,
+		GasLimit:   msg.GasLimit,
+		GasFeeCap:  msg.GasFeeCap,
+		GasPremium: msg.GasPremium,
+		Method:     msg.Method,
+		Params:     msg.Params,
+	}
+}
+
+func toLotusEthMessageMatch(src *types.MessageMatch) lapi.MessageMatch {
+	return lapi.MessageMatch{
+		From: src.From,
+		To:   src.To,
+	}
+}
+
+func toLotusEthCall(src types.EthCall) ethtypes.EthCall {
+	return ethtypes.EthCall{
+		From:     (*ethtypes.EthAddress)(src.From),
+		To:       (*ethtypes.EthAddress)(src.To),
+		Gas:      ethtypes.EthUint64(src.Gas),
+		GasPrice: ethtypes.EthBigInt(src.GasPrice),
+		Value:    ethtypes.EthBigInt(src.Value),
+		Data:     ethtypes.EthBytes(src.Data),
+	}
 }
 
 func checkByJSON(a, b interface{}) error {
@@ -50,6 +87,20 @@ func checkByJSON(a, b interface{}) error {
 	}
 
 	return fmt.Errorf("json marshal result not match %s != %s", string(d), string(d2))
+}
+
+func checkInvocResult(vres *types.InvocResult, lres *lapi.InvocResult) error {
+	if err := checkByJSON(vres.MsgRct, lres.MsgRct); err != nil {
+		return fmt.Errorf("%+v != %+v", vres.MsgRct, lres.MsgRct)
+	}
+	if err := checkByJSON(vres.GasCost, lres.GasCost); err != nil {
+		return fmt.Errorf("%+v != %+v", vres.GasCost, lres.GasCost)
+	}
+	if err := checkByJSON(vres.ExecutionTrace, lres.ExecutionTrace); err != nil {
+		return fmt.Errorf("%+v != %+v", vres.ExecutionTrace, lres.ExecutionTrace)
+	}
+
+	return nil
 }
 
 func tsEquals(ts *types.TipSet, ots *ltypes.TipSet) error {
@@ -72,18 +123,6 @@ func tsEquals(ts *types.TipSet, ots *ltypes.TipSet) error {
 		if cid != ots.Cids()[i] {
 			return fmt.Errorf("block %s != %s", cid, ots.Cids()[i])
 		}
-	}
-
-	return nil
-}
-
-func ethBigIntEqual(a types.EthBigInt, b ethtypes.EthBigInt) error {
-	if a.Int == nil && b.Int == nil {
-		return nil
-	}
-
-	if (a.Int == nil || b.Int == nil) || a.Cmp(b.Int) != 0 {
-		return fmt.Errorf("not match %v != %v", a, b)
 	}
 
 	return nil
@@ -209,4 +248,29 @@ func equalJSONMarshal(a, b interface{}) bool {
 		return false
 	}
 	return string(data) == string(data2)
+}
+
+func resultCheckWithEqual(o1, o2 interface{}) error {
+	if !equal(o1, o2) {
+		return fmt.Errorf("not match obj1 %+v, obj2 %+v", o1, o2)
+	}
+	return nil
+}
+
+func resultCheckWithInvocResult(msg cid.Cid, o1, o2 interface{}) error {
+	r1, _ := o1.(*types.InvocResult)
+	r2, _ := o2.(*lapi.InvocResult)
+
+	if err := checkInvocResult(r1, r2); err != nil {
+		return fmt.Errorf("msg %s, \nerror: %v", msg, err)
+	}
+
+	return nil
+}
+
+func toInterface(objs ...interface{}) []interface{} {
+	i := make([]interface{}, 0, len(objs))
+	i = append(i, objs...)
+
+	return i
 }
