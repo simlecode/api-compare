@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -27,7 +28,8 @@ func Run(cctx *cli.Context) error {
 	fmt.Println("lotus url", lURL, "lotus token", lToken)
 	fmt.Println("venus url", vURL, "venus token", vToken)
 
-	ctx := cctx.Context
+	ctx, cancel := context.WithCancel(cctx.Context)
+	defer cancel()
 
 	vAPI, vclose, err := v1.DialFullNodeRPC(ctx, vURL, vToken, nil)
 	if err != nil {
@@ -73,7 +75,12 @@ func Run(cctx *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("new data provider error: %v", err)
 	}
-	cmgr := newCompareMgr(ctx, vAPI, lAPI, dp, currTS)
+
+	r := newRegister()
+	ac := newAPICompare(ctx, vAPI, lAPI, dp, cctx.Int("concurrency"))
+	r.registerAPICompare(ac)
+
+	cmgr := newCompareMgr(ctx, vAPI, lAPI, dp, r, currTS)
 	go cmgr.start()
 
 	<-c

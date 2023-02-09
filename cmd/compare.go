@@ -3,370 +3,136 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log"
+	"math"
+	"strings"
 
+	"github.com/filecoin-project/go-address"
+	"github.com/filecoin-project/go-state-types/big"
 	"github.com/filecoin-project/go-state-types/crypto"
-	"github.com/filecoin-project/go-state-types/network"
 	"github.com/filecoin-project/lotus/api"
 	ltypes "github.com/filecoin-project/lotus/chain/types"
+	"github.com/filecoin-project/lotus/chain/types/ethtypes"
 	"github.com/filecoin-project/venus/pkg/constants"
 	v1 "github.com/filecoin-project/venus/venus-shared/api/chain/v1"
 	"github.com/filecoin-project/venus/venus-shared/types"
 	"github.com/ipfs/go-cid"
+	"github.com/sirupsen/logrus"
 )
 
-const latestNetworkVersion = network.Version17
+const (
+	methodPrefix = "Compare"
+)
 
-func newCompareMgr(ctx context.Context,
+func newAPICompare(ctx context.Context,
 	vAPI v1.FullNode,
 	lAPI api.FullNode,
 	dp *dataProvider,
-	currTS *types.TipSet,
-) *compareMgr {
-	return &compareMgr{
-		ctx:    ctx,
-		vAPI:   vAPI,
-		lAPI:   lAPI,
-		dp:     dp,
-		currTS: currTS,
-		next:   make(chan struct{}, 10),
+	concurrency int,
+) *apiCompare {
+	if concurrency <= 0 {
+		concurrency = 5
+	}
+	return &apiCompare{
+		ctx:     ctx,
+		vAPI:    vAPI,
+		lAPI:    lAPI,
+		dp:      dp,
+		handler: newHandler(ctx, vAPI, lAPI, concurrency),
 	}
 }
 
-type compareMgr struct {
+type apiCompare struct {
 	ctx context.Context
 
 	vAPI v1.FullNode
 	lAPI api.FullNode
 
-	dp *dataProvider
-
-	currTS   *types.TipSet
-	latestTS *types.TipSet
-
-	next chan struct{}
+	dp      *dataProvider
+	handler *handler
 }
 
-func (cmgr *compareMgr) start() {
-	if err := cmgr.chainNotify(); err != nil {
-		log.Fatalf("chain notify error: %v\n", err)
-	}
-
-	first := true
-	cmgr.next <- struct{}{}
-
-	for {
-		select {
-		case <-cmgr.ctx.Done():
-			fmt.Println("context done")
-			return
-		case <-cmgr.next:
-			if first {
-				first = false
-			} else {
-				ts, err := cmgr.findNextTS(cmgr.currTS)
-				if err != nil {
-					panic(err)
-				}
-				cmgr.currTS = ts
-			}
-			if err := cmgr.compareAPI(); err != nil {
-				fmt.Printf("compare api error: %v\n", err)
-			}
-		}
-	}
-}
-
-func (cmgr *compareMgr) chainNotify() error {
-	ctx, cancel := context.WithCancel(cmgr.ctx)
-	notifs, err := cmgr.vAPI.ChainNotify(ctx)
-	if err != nil {
-		cancel()
-		return err
-	}
+func (ac *apiCompare) sendAndWait(methodName string, args []interface{}, opts ...reqOpt) error {
+	req := newReq(methodName, args, opts...)
+	ac.handler.send(req)
 
 	select {
-	case noti := <-notifs:
-		if len(noti) != 1 {
-			cancel()
-			return fmt.Errorf("expect hccurrent length 1 but for %d", len(noti))
-		}
-
-		if noti[0].Type != types.HCCurrent {
-			cancel()
-			return fmt.Errorf("expect hccurrent event but got %s ", noti[0].Type)
-		}
-		cmgr.latestTS = noti[0].Val
-	case <-ctx.Done():
-		cancel()
-		return ctx.Err()
-	}
-
-	go func() {
-		defer cancel()
-
-		for notif := range notifs {
-			var apply []*types.TipSet
-
-			for _, change := range notif {
-				switch change.Type {
-				case types.HCApply:
-					apply = append(apply, change.Val)
-				}
-			}
-			if apply[0].Height() > cmgr.latestTS.Height() {
-				cmgr.latestTS = apply[0]
-
-				cmgr.next <- struct{}{}
-			}
-		}
-	}()
-
-	return nil
-}
-
-func (cmgr *compareMgr) findNextTS(currTS *types.TipSet) (*types.TipSet, error) {
-	vts, err := cmgr.vAPI.ChainGetTipSetAfterHeight(cmgr.ctx, currTS.Height()+1, types.EmptyTSK)
-	if err != nil {
-		return nil, err
-	}
-	lts, err := cmgr.lAPI.ChainGetTipSetAfterHeight(cmgr.ctx, currTS.Height()+1, ltypes.EmptyTSK)
-	if err != nil {
-		return nil, err
-	}
-
-	if vts.Height() != lts.Height() {
-		return nil, fmt.Errorf("height not match %d != %d", vts.Height(), lts.Height())
-	}
-	if !vts.Key().Equals(types.NewTipSetKey(lts.Cids()...)) {
-		return nil, fmt.Errorf("cids not match %v != %v", vts.Cids(), lts.Cids())
-	}
-
-	return vts, nil
-}
-
-func (cmgr *compareMgr) compareAPI() error {
-	if err := cmgr.dp.reset(cmgr.currTS); err != nil {
+	case <-ac.ctx.Done():
+		return ac.ctx.Err()
+	case err := <-req.err:
 		return err
 	}
-
-	cmgr.printResult("StateAccountKey", cmgr.compareStateAccountKey())
-	cmgr.printResult("StateGetActor", cmgr.compareStateGetActor())
-	cmgr.printResult("ChainGetTipSet", cmgr.compareChainGetTipSet())
-	cmgr.printResult("ChainGetTipSetByHeight", cmgr.compareChainGetTipSetByHeight())
-	cmgr.printResult("StateGetRandomnessFromBeacon", cmgr.compareStateGetRandomnessFromBeacon())
-	cmgr.printResult("StateGetRandomnessFromTickets", cmgr.compareStateGetRandomnessFromTickets())
-	cmgr.printResult("StateGetBeaconEntry", cmgr.compareStateGetBeaconEntry())
-	cmgr.printResult("ChainGetBlock", cmgr.compareChainGetBlock())
-	cmgr.printResult("ChainGetBlockMessages", cmgr.compareChainGetBlockMessages())
-	cmgr.printResult("ChainGetMessage", cmgr.compareChainGetMessage())
-	cmgr.printResult("ChainGetMessagesInTipset", cmgr.compareChainGetMessagesInTipset())
-	cmgr.printResult("ChainGetParentMessages", cmgr.compareChainGetParentMessages())
-	cmgr.printResult("ChainGetParentReceipts", cmgr.compareChainGetParentReceipts())
-	cmgr.printResult("StateVerifiedRegistryRootKey", cmgr.compareStateVerifiedRegistryRootKey())
-	cmgr.printResult("StateVerifierStatus", cmgr.compareStateVerifierStatus())
-	cmgr.printResult("StateNetworkName", cmgr.compareStateNetworkName())
-	cmgr.printResult("SearchWaitMessage", cmgr.compareSearchWaitMessage())
-	cmgr.printResult("StateNetworkVersion", cmgr.compareStateNetworkVersion())
-	cmgr.printResult("ChainGetPath", cmgr.compareChainGetPath())
-	cmgr.printResult("StateGetNetworkParams", cmgr.compareStateGetNetworkParams())
-	cmgr.printResult("StateActorCodeCIDs", cmgr.compareStateActorCodeCIDs())
-	cmgr.printResult("ChainGetGenesis", cmgr.compareChainGetGenesis())
-	cmgr.printResult("StateActorManifestCID", cmgr.compareStateActorManifestCID())
-	cmgr.printResult("MinerGetBaseInfo", cmgr.compareMinerGetBaseInfo())
-
-	// eth api
-	cmgr.printResult("EthAccounts", cmgr.compareEthAccounts())
-	cmgr.printResult("EthBlockNumber", cmgr.compareEthBlockNumber())
-	cmgr.printResult("EthGetBlockTransactionCountByNumber", cmgr.compareEthGetBlockTransactionCountByNumber())
-	cmgr.printResult("EthGetBlockTransactionCountByHash", cmgr.compareEthGetBlockTransactionCountByHash())
-	cmgr.printResult("EthGetBlockByHash", cmgr.compareEthGetBlockByHash())
-	cmgr.printResult("EthGetBlockByNumber", cmgr.compareEthGetBlockByNumber())
-	cmgr.printResult("EthGetTransactionByHash", cmgr.compareEthGetTransactionByHash())
-	cmgr.printResult("EthGetTransactionCount", cmgr.compareEthGetTransactionCount())
-	cmgr.printResult("EthGetTransactionReceipt", cmgr.compareEthGetTransactionReceipt())
-	cmgr.printResult("EthGetTransactionByBlockHashAndIndex", cmgr.compareEthGetTransactionByBlockHashAndIndex())
-	cmgr.printResult("EthGetTransactionByBlockNumberAndIndex", cmgr.compareEthGetTransactionByBlockNumberAndIndex())
-	cmgr.printResult("EthGetCode", cmgr.compareEthGetCode())
-	// cmgr.printResult("EthGetStorageAt", cmgr.compareEthGetStorageAt())
-	cmgr.printResult("EthGetBalance", cmgr.compareEthGetBalance())
-	cmgr.printResult("EthChainId", cmgr.compareEthChainId())
-	cmgr.printResult("NetVersion", cmgr.compareNetVersion())
-	cmgr.printResult("NetListening", cmgr.compareNetListening())
-	cmgr.printResult("EthProtocolVersion", cmgr.compareEthProtocolVersion())
-	cmgr.printResult("EthGasPrice", cmgr.compareEthGasPrice())
-	cmgr.printResult("EthFeeHistory", cmgr.compareEthFeeHistory())
-	cmgr.printResult("EthMaxPriorityFeePerGas", cmgr.compareEthMaxPriorityFeePerGas())
-	cmgr.printResult("EthEstimateGas", cmgr.compareEthEstimateGas())
-	cmgr.printResult("EthCall", cmgr.compareEthCall())
-	cmgr.printResult("EthSendRawTransaction", cmgr.compareEthSendRawTransaction())
-
-	return nil
 }
 
-func (cmgr *compareMgr) compareStateAccountKey() error {
-	addr := cmgr.dp.getSender()
+func (ac *apiCompare) CompareStateAccountKey() error {
+	addr := ac.dp.getSender()
 	if addr.Empty() {
 		return nil
 	}
-	vaddr, err := cmgr.vAPI.StateAccountKey(cmgr.ctx, addr, cmgr.currTS.Key())
-	if err != nil {
-		return err
-	}
-	laddr, err := cmgr.lAPI.StateAccountKey(cmgr.ctx, addr, toLoutsTipsetKey(cmgr.currTS.Key()))
-	if err != nil {
-		return err
-	}
-	if vaddr != laddr {
-		return fmt.Errorf("address not match %s != %s, origin address %s", vaddr, laddr, addr)
-	}
 
-	vaddr2, err := cmgr.vAPI.StateAccountKey(cmgr.ctx, vaddr, cmgr.currTS.Key())
-	if err != nil {
-		return err
-	}
-	laddr, err = cmgr.lAPI.StateAccountKey(cmgr.ctx, vaddr, toLoutsTipsetKey(cmgr.currTS.Key()))
-	if err != nil {
-		return err
-	}
-	if vaddr2 != laddr {
-		return fmt.Errorf("address not match %s != %s, origin address %s", vaddr2, laddr, vaddr)
-	}
+	req := newReq(stateAccountKey, toInterface(addr, ac.dp.currTS.Key()))
+	ac.handler.send(req)
 
-	return nil
+	return <-req.err
 }
 
-func (cmgr *compareMgr) compareStateGetActor() error {
-	vactor, err := cmgr.vAPI.StateGetActor(cmgr.ctx, cmgr.dp.defaultMiner(), cmgr.currTS.Key())
-	if err != nil {
-		return err
-	}
-	lactor, err := cmgr.lAPI.StateGetActor(cmgr.ctx, cmgr.dp.defaultMiner(), toLoutsTipsetKey(cmgr.currTS.Key()))
-	if err != nil {
-		return err
-	}
+func (ac *apiCompare) CompareChainGetTipSet() error {
+	req := newReq(chainGetTipSet, []interface{}{ac.ctx, ac.dp.currTS.Key()})
+	ac.handler.send(req)
 
-	return checkByJSON(vactor, lactor)
+	return <-req.err
 }
 
-func (cmgr *compareMgr) compareChainGetTipSet() error {
-	vts, err := cmgr.vAPI.ChainGetTipSet(cmgr.ctx, cmgr.currTS.Key())
-	if err != nil {
-		return err
-	}
-	lts, err := cmgr.lAPI.ChainGetTipSet(cmgr.ctx, toLoutsTipsetKey(cmgr.currTS.Key()))
-	if err != nil {
-		return err
-	}
+func (ac *apiCompare) CompareChainGetTipSetByHeight() error {
+	ts := ac.dp.currTS
+	height := ts.Height() - 10
+	key := ts.Key()
 
-	return checkByJSON(vts, lts)
-}
-
-func (cmgr *compareMgr) compareChainGetTipSetByHeight() error {
-	height := cmgr.currTS.Height() - 10
-	key := cmgr.currTS.Key()
-
-	vts, err := cmgr.vAPI.ChainGetTipSetByHeight(cmgr.ctx, height, key)
+	req := newReq(chainGetTipSetByHeight, []interface{}{ac.ctx, height, key})
+	ac.handler.send(req)
+	err := <-req.err
 	if err != nil {
-		return err
-	}
-	lts, err := cmgr.lAPI.ChainGetTipSetByHeight(cmgr.ctx, height, toLoutsTipsetKey(key))
-	if err != nil {
-		return err
-	}
-	if err := checkByJSON(vts, lts); err != nil {
 		return err
 	}
 
 	// Too high
-	_, err = cmgr.vAPI.ChainGetTipSetByHeight(cmgr.ctx, height+100, key)
-	if err == nil {
-		return fmt.Errorf("expect error but found nil")
-	}
-	_, err = cmgr.lAPI.ChainGetTipSetByHeight(cmgr.ctx, height+100, toLoutsTipsetKey(key))
-	if err == nil {
-		return fmt.Errorf("expect error but found nil")
-	}
+	req = newReq(chainGetTipSetByHeight, []interface{}{ac.ctx, height + 100, key}, withExpectCallAPIError())
+	ac.handler.send(req)
 
-	return nil
+	return <-req.err
 }
 
-func (cmgr *compareMgr) compareStateGetRandomnessFromBeacon() error {
+func (ac *apiCompare) CompareStateGetRandomnessFromBeacon() error {
 	per := crypto.DomainSeparationTag_TicketProduction
-	randEpoch := cmgr.currTS.Height()
+	randEpoch := ac.dp.currTS.Height()
 	emtropy := []byte("fixed-randomness")
-	tsk := cmgr.currTS.Key()
+	key := ac.dp.currTS.Key()
 
 	for per < crypto.DomainSeparationTag_PoStChainCommit {
-		vrandomness, err := cmgr.vAPI.StateGetRandomnessFromBeacon(cmgr.ctx, per, randEpoch, emtropy, tsk)
-		if err != nil {
+		req := newReq(stateGetRandomnessFromBeacon, []interface{}{ac.ctx, per, randEpoch, emtropy, key})
+		ac.handler.send(req)
+		if err := <-req.err; err != nil {
 			return err
 		}
-		lrandomness, err := cmgr.lAPI.StateGetRandomnessFromBeacon(cmgr.ctx, per, randEpoch, emtropy, toLoutsTipsetKey(tsk))
-		if err != nil {
-			return err
-		}
-		if err := checkByJSON(vrandomness, lrandomness); err != nil {
-			return err
-		}
-
 		per++
 	}
 
 	return nil
 }
 
-func (cmgr *compareMgr) compareStateGetRandomnessFromTickets() error {
-	per := crypto.DomainSeparationTag_TicketProduction
-	randEpoch := cmgr.currTS.Height()
-	emtropy := []byte("fixed-randomness")
-	tsk := cmgr.currTS.Key()
+func (ac *apiCompare) CompareStateGetBeaconEntry() error {
+	height := ac.dp.currTS.Height()
 
-	for per < crypto.DomainSeparationTag_PoStChainCommit {
-		vrandomness, err := cmgr.vAPI.StateGetRandomnessFromTickets(cmgr.ctx, per, randEpoch, emtropy, tsk)
-		if err != nil {
-			return err
-		}
-		lrandomness, err := cmgr.lAPI.StateGetRandomnessFromTickets(cmgr.ctx, per, randEpoch, emtropy, toLoutsTipsetKey(tsk))
-		if err != nil {
-			return err
-		}
-		if err := checkByJSON(vrandomness, lrandomness); err != nil {
-			return err
-		}
+	req := newReq(stateGetBeaconEntry, []interface{}{ac.ctx, height})
+	ac.handler.send(req)
 
-		per++
-	}
-
-	return nil
+	return <-req.err
 }
 
-func (cmgr *compareMgr) compareStateGetBeaconEntry() error {
-	height := cmgr.currTS.Height()
-
-	vbe, err := cmgr.vAPI.StateGetBeaconEntry(cmgr.ctx, height)
-	if err != nil {
-		return err
-	}
-	lbe, err := cmgr.lAPI.StateGetBeaconEntry(cmgr.ctx, height)
-	if err != nil {
-		return err
-	}
-
-	return checkByJSON(vbe, lbe)
-}
-
-func (cmgr *compareMgr) compareChainGetBlock() error {
-	for _, blk := range cmgr.currTS.Blocks() {
-		vbh, err := cmgr.vAPI.ChainGetBlock(cmgr.ctx, blk.Cid())
-		if err != nil {
-			return err
-		}
-		lbh, err := cmgr.lAPI.ChainGetBlock(cmgr.ctx, blk.Cid())
-		if err != nil {
-			return err
-		}
-		if err := checkByJSON(vbh, lbh); err != nil {
+func (ac *apiCompare) CompareChainGetBlock() error {
+	for _, blk := range ac.dp.currTS.Blocks() {
+		req := newReq(chainGetBlock, []interface{}{ac.ctx, blk.Cid()})
+		ac.handler.send(req)
+		if err := <-req.err; err != nil {
 			return fmt.Errorf("block: %s, error: %v", blk.Cid(), err)
 		}
 	}
@@ -374,43 +140,31 @@ func (cmgr *compareMgr) compareChainGetBlock() error {
 	return nil
 }
 
-func (cmgr *compareMgr) compareChainGetBlockMessages() error {
-	for _, blk := range cmgr.currTS.Blocks() {
-		vmsgs, err := cmgr.vAPI.ChainGetBlockMessages(cmgr.ctx, blk.Cid())
-		if err != nil {
-			return err
-		}
-		lmsgs, err := cmgr.lAPI.ChainGetBlockMessages(cmgr.ctx, blk.Cid())
-		if err != nil {
-			return err
-		}
-
-		if !equal(vmsgs, lmsgs) {
-			return fmt.Errorf("block: %v, not match %+v != %+v", blk.Cid(), vmsgs, lmsgs)
+func (ac *apiCompare) CompareChainGetBlockMessages() error {
+	for _, blk := range ac.dp.currTS.Blocks() {
+		req := newReq(chainGetBlockMessages, []interface{}{ac.ctx, blk.Cid()})
+		ac.handler.send(req)
+		if err := <-req.err; err != nil {
+			return fmt.Errorf("block: %v, error %v", blk.Cid(), err)
 		}
 	}
 
 	return nil
 }
 
-func (cmgr *compareMgr) compareChainGetMessage() error {
-	for _, blk := range cmgr.currTS.Blocks() {
-		blkMsgs, err := cmgr.vAPI.ChainGetBlockMessages(cmgr.ctx, blk.Cid())
+func (ac *apiCompare) CompareChainGetMessage() error {
+	for _, blk := range ac.dp.currTS.Blocks() {
+		blkMsgs, err := ac.vAPI.ChainGetBlockMessages(ac.ctx, blk.Cid())
 		if err != nil {
 			return fmt.Errorf("failed to get block %s messages: %v", blk.Cid(), err)
 		}
+
 		for _, msgCID := range blkMsgs.Cids {
-			vmsg, err := cmgr.vAPI.ChainGetMessage(cmgr.ctx, msgCID)
-			if err != nil {
-				return err
-			}
-			lmsg, err := cmgr.lAPI.ChainGetMessage(cmgr.ctx, msgCID)
-			if err != nil {
-				return err
-			}
+			req := newReq(chainGetMessage, []interface{}{ac.ctx, msgCID}, withResultCheck(resultCheckWithEqual))
+			ac.handler.send(req)
 
-			if !equal(vmsg, lmsg) {
-				return fmt.Errorf("msg: %s, not match %+v != %+v", msgCID, vmsg, lmsg)
+			if err := <-req.err; err != nil {
+				return fmt.Errorf("msg: %s, error: %v", msgCID, err)
 			}
 		}
 	}
@@ -418,54 +172,23 @@ func (cmgr *compareMgr) compareChainGetMessage() error {
 	return nil
 }
 
-func (cmgr *compareMgr) compareChainGetMessagesInTipset() error {
-	key := cmgr.currTS.Key()
-	vmsgs, err := cmgr.vAPI.ChainGetMessagesInTipset(cmgr.ctx, key)
-	if err != nil {
-		return err
-	}
-	lmsgs, err := cmgr.lAPI.ChainGetMessagesInTipset(cmgr.ctx, toLoutsTipsetKey(key))
-	if err != nil {
+func (ac *apiCompare) CompareChainGetMessagesInTipset() error {
+	key := ac.dp.currTS.Key()
+
+	req := newReq(chainGetMessagesInTipset, []interface{}{ac.ctx, key}, withResultCheck(resultCheckWithEqual))
+	ac.handler.send(req)
+	if err := <-req.err; err != nil {
 		return err
 	}
 
-	if !equal(vmsgs, lmsgs) {
-		return fmt.Errorf("not match %+v != %+v", vmsgs, lmsgs)
-	}
-
 	return nil
 }
 
-func (cmgr *compareMgr) compareChainGetParentMessages() error {
-	for _, blkCID := range cmgr.currTS.Cids() {
-		vmsg, err := cmgr.vAPI.ChainGetParentMessages(cmgr.ctx, blkCID)
-		if err != nil {
-			return err
-		}
-		lmsg, err := cmgr.lAPI.ChainGetParentMessages(cmgr.ctx, blkCID)
-		if err != nil {
-			return err
-		}
-
-		if !equal(vmsg, lmsg) {
-			return fmt.Errorf("block: %s, not match %+v != %+v", blkCID, vmsg, lmsg)
-		}
-	}
-
-	return nil
-}
-
-func (cmgr *compareMgr) compareChainGetParentReceipts() error {
-	for _, blkCID := range cmgr.currTS.Cids() {
-		vreceipts, err := cmgr.vAPI.ChainGetParentReceipts(cmgr.ctx, blkCID)
-		if err != nil {
-			return err
-		}
-		lreceipts, err := cmgr.lAPI.ChainGetParentReceipts(cmgr.ctx, blkCID)
-		if err != nil {
-			return err
-		}
-		if err := checkByJSON(vreceipts, lreceipts); err != nil {
+func (ac *apiCompare) CompareChainGetParentMessages() error {
+	for _, blkCID := range ac.dp.currTS.Cids() {
+		req := newReq(chainGetParentMessages, []interface{}{ac.ctx, blkCID}, withResultCheck(resultCheckWithEqual))
+		ac.handler.send(req)
+		if err := <-req.err; err != nil {
 			return fmt.Errorf("block: %s, error: %v", blkCID, err)
 		}
 	}
@@ -473,83 +196,62 @@ func (cmgr *compareMgr) compareChainGetParentReceipts() error {
 	return nil
 }
 
-func (cmgr *compareMgr) compareStateVerifiedRegistryRootKey() error {
-	key := cmgr.currTS.Key()
-	vaddr, err := cmgr.vAPI.StateVerifiedRegistryRootKey(cmgr.ctx, key)
-	if err != nil {
-		return err
-	}
-	laddr, err := cmgr.lAPI.StateVerifiedRegistryRootKey(cmgr.ctx, toLoutsTipsetKey(key))
-	if err != nil {
-		return err
-	}
-
-	if vaddr != laddr {
-		return fmt.Errorf("address not match %s != %s", vaddr, laddr)
+func (ac *apiCompare) CompareChainGetParentReceipts() error {
+	for _, blkCID := range ac.dp.currTS.Cids() {
+		req := newReq(chainGetParentReceipts, toInterface(ac.ctx, blkCID))
+		ac.handler.send(req)
+		if err := <-req.err; err != nil {
+			return fmt.Errorf("block: %s, error: %v", blkCID, err)
+		}
 	}
 
 	return nil
 }
 
-func (cmgr *compareMgr) compareStateVerifierStatus() error {
-	key := cmgr.currTS.Key()
-	vres, err := cmgr.vAPI.StateVerifierStatus(cmgr.ctx, cmgr.dp.defaultMiner(), key)
-	if err != nil {
-		return err
-	}
-	lres, err := cmgr.lAPI.StateVerifierStatus(cmgr.ctx, cmgr.dp.defaultMiner(), toLoutsTipsetKey(key))
-	if err != nil {
-		return err
-	}
+func (ac *apiCompare) CompareStateVerifiedRegistryRootKey() error {
+	key := ac.dp.currTS.Key()
+	req := newReq(stateVerifiedRegistryRootKey, toInterface(ac.ctx, key))
+	ac.handler.send(req)
 
-	return bigIntEqual(vres, lres)
+	return <-req.err
 }
 
-func (cmgr *compareMgr) compareStateNetworkName() error {
-	vname, err := cmgr.vAPI.StateNetworkName(cmgr.ctx)
-	if err != nil {
-		return err
-	}
-	lname, err := cmgr.lAPI.StateNetworkName(cmgr.ctx)
-	if err != nil {
-		return err
-	}
-	if vname != types.NetworkName(lname) {
-		return fmt.Errorf("not match %s != %s", vname, lname)
-	}
+func (ac *apiCompare) CompareStateVerifierStatus() error {
+	key := ac.dp.currTS.Key()
+	req := newReq(stateVerifierStatus, toInterface(ac.ctx, ac.dp.defaultMiner(), key), withResultCheck(func(r1, r2 interface{}) error {
+		o1, _ := r1.(*big.Int)
+		o2, _ := r2.(*big.Int)
+		return bigIntEqual(o1, o2)
+	}))
+	ac.handler.send(req)
 
-	return nil
+	return <-req.err
 }
 
-func (cmgr *compareMgr) compareSearchWaitMessage() error {
-	key := cmgr.currTS.Key()
+func (ac *apiCompare) CompareStateNetworkName() error {
+	req := newReq(stateNetworkName, toInterface(ac.ctx))
+	ac.handler.send(req)
+
+	return <-req.err
+}
+
+func (ac *apiCompare) CompareSearchWaitMessage() error {
+	key := ac.dp.currTS.Key()
 	searchMsg := func(msgCID cid.Cid) error {
-		vmsg, err := cmgr.vAPI.StateSearchMsg(cmgr.ctx, key, msgCID, constants.LookbackNoLimit, true)
-		if err != nil {
-			return fmt.Errorf("search msg %s faield: %v", msgCID, err)
-		}
-		lmsg, err := cmgr.lAPI.StateSearchMsg(cmgr.ctx, toLoutsTipsetKey(key), msgCID, constants.LookbackNoLimit, true)
-		if err != nil {
-			return fmt.Errorf("search msg %s faield: %v", msgCID, err)
-		}
+		req := newReq(stateSearchMsg, toInterface(ac.ctx, key, msgCID, constants.LookbackNoLimit, true))
+		ac.handler.send(req)
 
-		return checkByJSON(vmsg, lmsg)
+		return <-req.err
 	}
 
 	waitMsg := func(msgCID cid.Cid) error {
-		vMsgLookup, err := cmgr.vAPI.StateWaitMsg(cmgr.ctx, msgCID, constants.DefaultConfidence, constants.LookbackNoLimit, true)
-		if err != nil {
-			return fmt.Errorf("wait msg %s faield: %v", msgCID, err)
-		}
-		lMsgLookup, err := cmgr.lAPI.StateWaitMsg(cmgr.ctx, msgCID, constants.DefaultConfidence, constants.LookbackNoLimit, true)
-		if err != nil {
-			return fmt.Errorf("wait msg %s faield: %v", msgCID, err)
-		}
+		req := newReq(stateWaitMsg, toInterface(ac.ctx, msgCID, constants.DefaultConfidence, constants.LookbackNoLimit, true))
+		ac.handler.send(req)
 
-		return checkByJSON(vMsgLookup, lMsgLookup)
+		return <-req.err
 	}
 
-	for i, msg := range cmgr.dp.getMsgs() {
+	for i, msg := range ac.dp.getMsgs() {
 		if i >= 5 {
 			break
 		}
@@ -564,128 +266,364 @@ func (cmgr *compareMgr) compareSearchWaitMessage() error {
 	return nil
 }
 
-func (cmgr *compareMgr) compareStateNetworkVersion() error {
-	key := cmgr.currTS.Key()
-	vv, err := cmgr.vAPI.StateNetworkVersion(cmgr.ctx, key)
+func (ac *apiCompare) CompareStateNetworkVersion() error {
+	key := ac.dp.currTS.Key()
+	req := newReq(stateNetworkVersion, toInterface(ac.ctx, key))
+	ac.handler.send(req)
+
+	return <-req.err
+}
+
+func (ac *apiCompare) CompareChainGetPath() error {
+	ts := ac.dp.currTS
+	from, err := ac.vAPI.ChainGetTipSetAfterHeight(ac.ctx, ts.Height()-5, ts.Key())
 	if err != nil {
 		return err
 	}
-	lv, err := cmgr.lAPI.StateNetworkVersion(cmgr.ctx, toLoutsTipsetKey(key))
-	if err != nil {
-		return err
+
+	req := newReq(chainGetPath, toInterface(ac.ctx, from.Key(), ts.Key()))
+	ac.handler.send(req)
+
+	return <-req.err
+}
+
+func (ac *apiCompare) CompareStateGetNetworkParams() error {
+	req := newReq(stateGetNetworkParams, toInterface(ac.ctx), withResultCheck(resultCheckWithEqual))
+	ac.handler.send(req)
+
+	return <-req.err
+}
+
+func (ac *apiCompare) CompareStateActorCodeCIDs() error {
+	req := newReq(stateActorCodeCIDs, toInterface(ac.ctx, latestNetworkVersion))
+	ac.handler.send(req)
+
+	return <-req.err
+}
+
+func (ac *apiCompare) CompareChainGetGenesis() error {
+	check := func(r1, r2 interface{}) error {
+		o1, _ := r1.(*types.TipSet)
+		o2, _ := r2.(*ltypes.TipSet)
+		return tsEquals(o1, o2)
 	}
-	if vv != lv {
-		return fmt.Errorf("not match %d != %d", vv, lv)
+
+	return ac.sendAndWait(chainGetGenesis, toInterface(ac.ctx), withResultCheck(check))
+}
+
+func (ac *apiCompare) CompareStateActorManifestCID() error {
+	return ac.sendAndWait(stateActorManifestCID, toInterface(ac.ctx, latestNetworkVersion))
+}
+
+func (ac *apiCompare) CompareStateCall() error {
+	msg := ac.dp.getMsg()
+	if msg == nil {
+		return nil
+	}
+
+	return ac.sendAndWait(stateCall, toInterface(ac.ctx, msg, types.EmptyTSK), withResultCheck(func(r1, r2 interface{}) error {
+		return resultCheckWithInvocResult(msg.Cid(), r1, r2)
+	}))
+}
+
+func (ac *apiCompare) CompareStateReplay() error {
+	msg := ac.dp.getMsg()
+	if msg == nil {
+		return nil
+	}
+	c := msg.Cid()
+
+	return ac.sendAndWait(stateReplay, toInterface(ac.ctx, types.EmptyTSK, c), withResultCheck(func(r1, r2 interface{}) error {
+		return resultCheckWithInvocResult(c, r1, r2)
+	}))
+}
+
+func (ac *apiCompare) CompareMinerGetBaseInfo() error {
+	height := ac.dp.currTS.Height()
+	key := ac.dp.currTS.Parents()
+
+	return ac.sendAndWait(minerGetBaseInfo, toInterface(ac.ctx, ac.dp.defaultMiner(), height, key))
+}
+
+//// state ////
+
+func (ac *apiCompare) CompareStateReadState() error {
+	addr := ac.dp.getSender()
+	if addr == address.Undef {
+		addr = ac.dp.defaultMiner()
+	}
+	key := ac.dp.currTS.Key()
+
+	return ac.sendAndWait(stateReadState, toInterface(ac.ctx, addr, key))
+}
+
+func (ac *apiCompare) CompareStateListMessages() error {
+	from := ac.dp.getSender()
+	if from.Empty() {
+		return nil
+	}
+	height := ac.dp.currTS.Height() - 20
+
+	return ac.sendAndWait(stateListMessages, toInterface(ac.ctx, &types.MessageMatch{From: from}, types.EmptyTSK, height))
+}
+
+func (ac *apiCompare) CompareStateDecodeParams() error {
+	msgs := ac.dp.getMsgs()
+	for _, msg := range msgs {
+		if len(msg.Params) > 0 {
+			return ac.sendAndWait(stateDecodeParams, toInterface(ac.ctx, msg.To, msg.Method, msg.Params, types.EmptyTSK))
+		}
 	}
 
 	return nil
 }
 
-func (cmgr *compareMgr) compareChainGetPath() error {
-	ts := cmgr.currTS
-	from, err := cmgr.vAPI.ChainGetTipSetAfterHeight(cmgr.ctx, ts.Height()-5, ts.Key())
-	if err != nil {
-		return err
-	}
+//// eth ////
 
-	vhc, err := cmgr.vAPI.ChainGetPath(cmgr.ctx, from.Key(), ts.Key())
-	if err != nil {
-		return err
-	}
-
-	lhc, err := cmgr.lAPI.ChainGetPath(cmgr.ctx, toLoutsTipsetKey(from.Key()), toLoutsTipsetKey(ts.Key()))
-	if err != nil {
-		return err
-	}
-
-	return checkByJSON(vhc, lhc)
+func (ac *apiCompare) CompareEthAccounts() error {
+	// EthAccounts will always return [] since we don't expect venus to manage private keys
+	return ac.sendAndWait(ethAccounts, toInterface(ac.ctx))
 }
 
-func (cmgr *compareMgr) compareStateGetNetworkParams() error {
-	vparams, err := cmgr.vAPI.StateGetNetworkParams(cmgr.ctx)
-	if err != nil {
-		return err
+func (ac *apiCompare) CompareEthBlockNumber() error {
+	check := func(r1, r2 interface{}) error {
+		vnum, _ := r1.(types.EthUint64)
+		lnum, _ := r2.(ethtypes.EthUint64)
+		if math.Abs(float64(uint64(vnum)-uint64(lnum))) > 1 {
+			return fmt.Errorf("not match %d != %d, may sync slow", vnum, lnum)
+		}
+		return nil
 	}
-	lparams, err := cmgr.lAPI.StateGetNetworkParams(cmgr.ctx)
+
+	return ac.sendAndWait(ethBlockNumber, toInterface(ac.ctx), withResultCheck(check))
+}
+
+func (ac *apiCompare) CompareEthGetBlockTransactionCountByNumber() error {
+	height := ac.dp.currTS.Height()
+
+	return ac.sendAndWait(ethGetBlockTransactionCountByNumber, toInterface(ac.ctx, types.EthUint64(height)))
+}
+
+func (ac *apiCompare) CompareEthGetBlockTransactionCountByHash() error {
+	blkHash, _, err := ac.dp.getBlockHash()
 	if err != nil {
 		return err
 	}
 
-	if !equal(vparams, lparams) {
-		return fmt.Errorf("not match %+v != %+v", vparams, lparams)
+	return ac.sendAndWait(ethGetBlockTransactionCountByHash, toInterface(ac.ctx, blkHash))
+}
+
+func (ac *apiCompare) CompareEthGetBlockByHash() error {
+	blkHash, _, err := ac.dp.getBlockHash()
+	if err != nil {
+		return err
+	}
+
+	var fullTxInfo bool
+	if err := ac.sendAndWait(ethGetBlockByHash, toInterface(ac.ctx, blkHash, fullTxInfo)); err != nil {
+		return fmt.Errorf("fullTxInfo: false, blkhash %s, error: %v", blkHash.ToCid(), err)
+	}
+
+	fullTxInfo = true
+	if err := ac.sendAndWait(ethGetBlockByHash, toInterface(ac.ctx, blkHash, fullTxInfo)); err != nil {
+		return fmt.Errorf("fullTxInfo: true,  blkhash %s, error: %v", blkHash.ToCid(), err)
 	}
 
 	return nil
 }
 
-func (cmgr *compareMgr) compareStateActorCodeCIDs() error {
-	vactorcode, err := cmgr.vAPI.StateActorCodeCIDs(cmgr.ctx, latestNetworkVersion)
+func (ac *apiCompare) CompareEthGetBlockByNumber() error {
+	blkOpt, err := ac.dp.getBlkOptByHeight()
 	if err != nil {
 		return err
 	}
-	lactorcode, err := cmgr.lAPI.StateActorCodeCIDs(cmgr.ctx, latestNetworkVersion)
-	if err != nil {
-		return err
-	}
+	blkOpt = strings.Replace(blkOpt, "\"", "", -1)
+	blkParams := []string{blkOpt, blkParamsPending, blkParamsLatest}
 
-	return checkByJSON(vactorcode, lactorcode)
-}
-
-func (cmgr *compareMgr) compareChainGetGenesis() error {
-	vts, err := cmgr.vAPI.ChainGetGenesis(cmgr.ctx)
-	if err != nil {
-		return err
-	}
-	lts, err := cmgr.lAPI.ChainGetGenesis(cmgr.ctx)
-	if err != nil {
-		return err
-	}
-
-	return tsEquals(vts, lts)
-}
-
-func (cmgr *compareMgr) compareStateActorManifestCID() error {
-	vres, err := cmgr.vAPI.StateActorManifestCID(cmgr.ctx, latestNetworkVersion)
-	if err != nil {
-		return err
-	}
-	lres, err := cmgr.lAPI.StateActorManifestCID(cmgr.ctx, latestNetworkVersion)
-	if err != nil {
-		return err
-	}
-	if vres != lres {
-		return fmt.Errorf("not match %s != %s", vres, lres)
+	for _, blkParam := range blkParams {
+		if err := ac.sendAndWait(ethGetBlockByNumber, toInterface(ac.ctx, blkParam, false)); err != nil {
+			return fmt.Errorf("block param %s, error: %v", blkParam, err)
+		}
 	}
 
 	return nil
 }
 
-func (cmgr *compareMgr) compareMinerGetBaseInfo() error {
-	height := cmgr.currTS.Height()
-	tsk := cmgr.currTS.Parents()
-	vinfo, err := cmgr.vAPI.MinerGetBaseInfo(cmgr.ctx, cmgr.dp.defaultMiner(), height, tsk)
+func (ac *apiCompare) CompareEthGetTransactionByHash() error {
+	msgHash, _, err := ac.dp.getTxHash()
 	if err != nil {
 		return err
 	}
 
-	linfo, err := cmgr.lAPI.MinerGetBaseInfo(cmgr.ctx, cmgr.dp.defaultMiner(), height, toLoutsTipsetKey(tsk))
-	if err != nil {
-		return err
-	}
-
-	// return checkByJSON(vinfo, linfo)
-	if !equal(vinfo, linfo) {
-		return fmt.Errorf("not match %+v != %+v", vinfo, linfo)
-	}
-
-	return nil
+	return ac.sendAndWait(ethGetTransactionByHash, toInterface(ac.ctx, &msgHash))
 }
 
-func (cmgr *compareMgr) printResult(method string, err error) {
-	height := cmgr.currTS.Height()
-	if err != nil {
-		fmt.Printf("height: %d, compare %s failed, reason: %v \n", height, method, err)
-	} else {
-		fmt.Printf("height: %d, compare %s success \n", height, method)
+func (ac *apiCompare) CompareEthGetTransactionCount() error {
+	addr := ac.dp.getSender()
+	if addr.Empty() {
+		return nil
 	}
+	blkOpt, err := ac.dp.getBlkOptByHeight()
+	if err != nil {
+		return err
+	}
+	blkOpt = strings.Replace(blkOpt, "\"", "", -1)
+	sender, err := types.EthAddressFromFilecoinAddress(addr)
+	if err != nil {
+		return err
+	}
+
+	return ac.sendAndWait(ethGetTransactionCount, toInterface(ac.ctx, sender, blkOpt))
+}
+
+func (ac *apiCompare) CompareEthGetTransactionReceipt() error {
+	txHash, _, err := ac.dp.getTxHash()
+	if err != nil {
+		return err
+	}
+
+	return ac.sendAndWait(ethGetTransactionReceipt, toInterface(ac.ctx, txHash))
+}
+
+func (ac *apiCompare) CompareEthGetTransactionByBlockHashAndIndex() error {
+	return ac.sendAndWait(ethGetTransactionByBlockHashAndIndex, toInterface(ac.ctx, emptyEthHash, types.EthUint64(0)))
+}
+
+func (ac *apiCompare) CompareEthGetTransactionByBlockNumberAndIndex() error {
+	height := ac.dp.currTS.Height()
+	return ac.sendAndWait(ethGetTransactionByBlockNumberAndIndex, toInterface(ac.ctx, types.EthUint64(height), types.EthUint64(0)))
+}
+
+func (ac *apiCompare) CompareEthGetCode() error {
+	addr, _, err := ac.dp.getEthAddress()
+	if err != nil {
+		return err
+	}
+
+	return ac.sendAndWait(ethGetCode, toInterface(ac.ctx, addr, blkParamsLatest))
+}
+
+func (ac *apiCompare) CompareEthGetStorageAt() error {
+	addr, _, err := ac.dp.getEthAddress()
+	if err != nil {
+		return err
+	}
+
+	return ac.sendAndWait(ethGetStorageAt, toInterface(ac.ctx, addr, types.EthBytes{}, blkParamsLatest))
+}
+
+func (ac *apiCompare) CompareEthGetBalance() error {
+	addr, _, err := ac.dp.getEthAddress()
+	if err != nil {
+		return err
+	}
+
+	return ac.sendAndWait(ethGetBalance, toInterface(ac.ctx, addr, blkParamsLatest))
+}
+
+func (ac *apiCompare) CompareEthChainId() error {
+	return ac.sendAndWait(ethChainId, toInterface(ac.ctx))
+}
+
+func (ac *apiCompare) CompareNetVersion() error {
+	return ac.sendAndWait(netVersion, toInterface(ac.ctx))
+}
+
+func (ac *apiCompare) CompareNetListening() error {
+	return ac.sendAndWait(netListening, toInterface(ac.ctx))
+}
+
+func (ac *apiCompare) CompareEthProtocolVersion() error {
+	return ac.sendAndWait(ethProtocolVersion, toInterface(ac.ctx))
+}
+
+func (ac *apiCompare) CompareEthGasPrice() error {
+	return ac.sendAndWait(ethGasPrice, toInterface(ac.ctx), withResultCheck(func(r1, r2 interface{}) error {
+		logrus.Infof("compare EthGasPrice: %d %d\n", r1, r2)
+		return nil
+	}))
+}
+
+func (ac *apiCompare) CompareEthFeeHistory() error {
+	blkCount := 10
+	newestBlk, err := ac.dp.getBlkOptByHeight()
+	if err != nil {
+		return err
+	}
+	newestBlk = strings.Replace(newestBlk, "\"", "", -1)
+	rewardPercentiles := make([]float64, 0)
+
+	return ac.sendAndWait(ethFeeHistory, toInterface(ac.ctx, types.EthUint64(blkCount), newestBlk, rewardPercentiles))
+}
+
+func (ac *apiCompare) CompareEthMaxPriorityFeePerGas() error {
+	return ac.sendAndWait(ethMaxPriorityFeePerGas, toInterface(ac.ctx), withResultCheck(func(r1, r2 interface{}) error {
+		logrus.Infof("compare EthMaxPriorityFeePerGas: %d %d\n", r1, r2)
+		return nil
+	}))
+}
+
+func (ac *apiCompare) CompareEthEstimateGas() error {
+	if err := ac.sendAndWait(ethEstimateGas, toInterface(ac.ctx, types.EthCall{})); err != nil {
+		return err
+	}
+
+	vfrom, err := types.EthAddressFromFilecoinAddress(ac.dp.defaultMiner())
+	if err != nil {
+		return err
+	}
+	vcall := types.EthCall{
+		From:  &vfrom,
+		To:    &vfrom,
+		Value: types.EthBigInt(big.NewInt(10)),
+	}
+
+	return ac.sendAndWait(ethEstimateGas, toInterface(ac.ctx, vcall))
+}
+
+func (ac *apiCompare) CompareEthCall() error {
+	if err := ac.sendAndWait(ethCall, toInterface(ac.ctx, types.EthCall{}, blkParamsLatest)); err != nil {
+		return err
+	}
+
+	vfrom, err := types.EthAddressFromFilecoinAddress(ac.dp.defaultMiner())
+	if err != nil {
+		return err
+	}
+	vcall := types.EthCall{
+		From:  &vfrom,
+		To:    &vfrom,
+		Value: types.EthBigInt(big.NewInt(10)),
+	}
+
+	return ac.sendAndWait(ethCall, toInterface(ac.ctx, vcall, blkParamsLatest))
+}
+
+func (ac *apiCompare) CompareWeb3ClientVersion() error {
+	return ac.sendAndWait(web3ClientVersion, toInterface(ac.ctx), withResultCheck(func(r1, r2 interface{}) error {
+		logrus.Infof("compare Web3ClientVersion: %v %v", r1, r2)
+		return nil
+	}))
+}
+
+func (ac *apiCompare) CompareEthGetTransactionHashByCid() error {
+	msg := ac.dp.getMsg()
+	if msg == nil {
+		return nil
+	}
+
+	return ac.sendAndWait(ethGetTransactionHashByCid, toInterface(ac.ctx, msg.Cid()))
+}
+
+func (ac *apiCompare) CompareEthGetMessageCidByTransactionHash() error {
+	msg := ac.dp.getMsg()
+	if msg == nil {
+		return nil
+	}
+	h, err := types.EthHashFromCid(msg.Cid())
+	if err != nil {
+		return err
+	}
+
+	return ac.sendAndWait(ethGetMessageCidByTransactionHash, toInterface(ac.ctx, &h))
 }
