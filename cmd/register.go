@@ -17,6 +17,7 @@ type register struct {
 
 type rfunc func() error
 
+// nolint
 func (r *register) registerFunc(name string, f rfunc) {
 	r.funcs[name] = f
 }

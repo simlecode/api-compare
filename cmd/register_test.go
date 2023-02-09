@@ -10,6 +10,6 @@ func TestRegisterAPICompare(t *testing.T) {
 	ac := &apiCompare{}
 	r := newRegister()
 
-	r.registerAPICompare(ac)
+	assert.NoError(t, r.registerAPICompare(ac))
 	assert.GreaterOrEqual(t, len(r.funcs), 1)
 }

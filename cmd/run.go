@@ -78,7 +78,9 @@ func Run(cctx *cli.Context) error {
 
 	r := newRegister()
 	ac := newAPICompare(ctx, vAPI, lAPI, dp, cctx.Int("concurrency"))
-	r.registerAPICompare(ac)
+	if err := r.registerAPICompare(ac); err != nil {
+		return err
+	}
 
 	cmgr := newCompareMgr(ctx, vAPI, lAPI, dp, r, currTS)
 	go cmgr.start()

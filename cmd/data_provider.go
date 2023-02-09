@@ -105,6 +105,7 @@ func (dp *dataProvider) getMsg() *types.Message {
 	return nil
 }
 
+// nolint
 func (dp *dataProvider) getSenders() []address.Address {
 	return dp.dataSet.senders
 }
@@ -117,6 +118,7 @@ func (dp *dataProvider) getSender() address.Address {
 	return address.Undef
 }
 
+// nolint
 func (dp *dataProvider) getIDAddress() address.Address {
 	if len(dp.dataSet.ids) > 0 {
 		return dp.dataSet.ids[0]
