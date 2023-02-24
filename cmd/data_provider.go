@@ -170,6 +170,9 @@ func (dp *dataProvider) getBlockHash() (types.EthHash, ethtypes.EthHash, error) 
 	if blkHash != types.EthHash(blkHash2) {
 		return emptyEthHash, emptyLEthHash, fmt.Errorf("parse block hash not match %v %v %v", c, blkHash, blkHash2)
 	}
+	if !blkHash.ToCid().Equals(c) {
+		return emptyEthHash, emptyLEthHash, fmt.Errorf("blkHash.ToCid() not match %v %v", c, blkHash.ToCid())
+	}
 
 	return blkHash, blkHash2, nil
 }

@@ -110,14 +110,11 @@ func unmarshalAny[T any](a interface{}) (T, error) {
 }
 
 func checkInvocResult(vRes *types.InvocResult, lRes *lapi.InvocResult) error {
-	if vRes.MsgCid != lRes.MsgCid {
-		return fmt.Errorf("msg cid not match %v != %v", vRes.MsgCid, lRes.MsgCid)
-	}
 	if vRes.Msg.Cid() != lRes.Msg.Cid() {
-		return fmt.Errorf("msg not match %v != %v", vRes.Msg, lRes.Msg)
-	}
-	if vRes.MsgCid != lRes.MsgCid {
-		return fmt.Errorf("msg cid not match %v != %v", vRes.MsgCid, lRes.MsgCid)
+		// 高度不一样导致地址的nonce不一样
+		if vRes.Msg.Nonce == lRes.Msg.Nonce {
+			return fmt.Errorf("msg not match %+v != %+v", vRes.Msg, lRes.Msg)
+		}
 	}
 	if err := checkByJSON(vRes.MsgRct, lRes.MsgRct); err != nil {
 		return fmt.Errorf("msg receipt: %+v != %+v", vRes.MsgRct, lRes.MsgRct)
@@ -126,10 +123,10 @@ func checkInvocResult(vRes *types.InvocResult, lRes *lapi.InvocResult) error {
 		return fmt.Errorf("gas cost: %+v != %+v", vRes.GasCost, lRes.GasCost)
 	}
 
-	return check(vRes.ExecutionTrace, lRes.ExecutionTrace)
+	return checkExecutionTrace(vRes.ExecutionTrace, lRes.ExecutionTrace)
 }
 
-func check(vTrace types.ExecutionTrace, lTrace ltypes.ExecutionTrace) error {
+func checkExecutionTrace(vTrace types.ExecutionTrace, lTrace ltypes.ExecutionTrace) error {
 	if vTrace.Error != lTrace.Error {
 		return fmt.Errorf("error not match %s != %s", vTrace.Error, lTrace.Error)
 	}
@@ -147,7 +144,7 @@ func check(vTrace types.ExecutionTrace, lTrace ltypes.ExecutionTrace) error {
 	}
 
 	for i := range vTrace.Subcalls {
-		if err := check(vTrace.Subcalls[i], lTrace.Subcalls[i]); err != nil {
+		if err := checkExecutionTrace(vTrace.Subcalls[i], lTrace.Subcalls[i]); err != nil {
 			return fmt.Errorf("subcalls %v", err)
 		}
 	}
