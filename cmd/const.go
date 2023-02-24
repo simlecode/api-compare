@@ -42,6 +42,7 @@ const (
 
 	// eth
 	ethAccounts                            = "EthAccounts"
+	ethAddressToFilecoinAddress            = "EthAddressToFilecoinAddress"
 	ethBlockNumber                         = "EthBlockNumber"
 	ethGetBlockTransactionCountByNumber    = "EthGetBlockTransactionCountByNumber"
 	ethGetBlockTransactionCountByHash      = "EthGetBlockTransactionCountByHash"

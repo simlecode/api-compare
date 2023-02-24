@@ -50,45 +50,6 @@ type apiInfo struct {
 	rt reflect.Type
 }
 
-type req struct {
-	methodName string
-	in         []interface{}
-	err        chan error
-
-	// option
-	resultChecker      resultCheckFunc
-	expectCallAPIError bool
-}
-
-type reqOpt func(*req)
-
-func newReq(methodName string, in []interface{}, opts ...reqOpt) *req {
-	r := &req{
-		methodName: methodName,
-		in:         in,
-		err:        make(chan error, 1),
-	}
-	for _, opt := range opts {
-		opt(r)
-	}
-
-	return r
-}
-
-func withResultCheck(f resultCheckFunc) reqOpt {
-	return func(r *req) {
-		r.resultChecker = f
-	}
-}
-
-func withExpectCallAPIError() reqOpt {
-	return func(r *req) {
-		r.expectCallAPIError = true
-	}
-}
-
-type resultCheckFunc func(r1, r2 interface{}) error
-
 func (h *handler) start() {
 	controlCh := make(chan struct{}, h.concurrency)
 	done := func() {
@@ -152,13 +113,16 @@ func (h *handler) compare(r *req) error {
 	}()
 	wg.Wait()
 
-	if len(vres) == 2 && vres[1].Interface() != nil && !r.expectCallAPIError {
-		return fmt.Errorf("venus call %s error %v", r.methodName, vres[1].Interface())
+	if len(vres) == 0 {
+		return h.handleError(vres[0], lres[0])
 	}
-	if len(lres) == 2 && lres[1].Interface() != nil && !r.expectCallAPIError {
-		return fmt.Errorf("lotus call %s error %v", r.methodName, lres[1].Interface())
+
+	if len(vres) == 2 {
+		if err := h.handleError(vres[1], lres[1]); err != nil && !r.expectCallAPIError {
+			return err
+		}
 	}
-	logrus.Tracef("call %s result: \n%+v \n%+v", r.methodName, vres[0].Interface(), lres[0].Interface())
+	logrus.Tracef("call %s result: \n%+v\n%+v", r.methodName, vres[0].Interface(), lres[0].Interface())
 
 	if r.resultChecker != nil {
 		return r.resultChecker(vres[0].Interface(), lres[0].Interface())
@@ -207,6 +171,20 @@ func tryConvertParam(param interface{}) interface{} {
 	}
 
 	return param
+}
+
+func (h *handler) handleError(vErr, lErr reflect.Value) error {
+	v := vErr.Interface()
+	l := lErr.Interface()
+
+	if v != nil || l != nil {
+		if v != nil && l != nil {
+			return fmt.Errorf("venus and lotus all return error: %v, %v", v, l)
+		}
+		return fmt.Errorf("venus error: %v, lotus error: %v", v, l)
+	}
+
+	return nil
 }
 
 func (h *handler) send(r *req) {
