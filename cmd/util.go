@@ -18,15 +18,15 @@ import (
 )
 
 func newLotusFullNodeRPCV1(ctx context.Context, url, token string) (lapi.FullNode, jsonrpc.ClientCloser, error) {
-	ainfo := api.NewAPIInfo(url, token)
-	endpoint, err := ainfo.DialArgs("v1")
+	apiInfo := api.NewAPIInfo(url, token)
+	endpoint, err := apiInfo.DialArgs("v1")
 	if err != nil {
 		return nil, nil, err
 	}
 
 	var res v1api.FullNodeStruct
 	closer, err := jsonrpc.NewMergeClient(ctx, endpoint, "Filecoin",
-		api.GetInternalStructs(&res), ainfo.AuthHeader())
+		api.GetInternalStructs(&res), apiInfo.AuthHeader())
 
 	return &res, closer, err
 }
@@ -97,6 +97,7 @@ func toJSON(a, b interface{}) ([]byte, []byte, error) {
 	return d, d2, nil
 }
 
+// nolint
 func unmarshalAny[T any](a interface{}) (T, error) {
 	var t T
 
@@ -108,24 +109,24 @@ func unmarshalAny[T any](a interface{}) (T, error) {
 	return t, json.Unmarshal(d, &t)
 }
 
-func checkInvocResult(vres *types.InvocResult, lres *lapi.InvocResult) error {
-	if vres.MsgCid != lres.MsgCid {
-		return fmt.Errorf("msg cid not match %v != %v", vres.MsgCid, lres.MsgCid)
+func checkInvocResult(vRes *types.InvocResult, lRes *lapi.InvocResult) error {
+	if vRes.MsgCid != lRes.MsgCid {
+		return fmt.Errorf("msg cid not match %v != %v", vRes.MsgCid, lRes.MsgCid)
 	}
-	if vres.Msg.Cid() != lres.Msg.Cid() {
-		return fmt.Errorf("msg not match %v != %v", vres.Msg, lres.Msg)
+	if vRes.Msg.Cid() != lRes.Msg.Cid() {
+		return fmt.Errorf("msg not match %v != %v", vRes.Msg, lRes.Msg)
 	}
-	if vres.MsgCid != lres.MsgCid {
-		return fmt.Errorf("msg cid not match %v != %v", vres.MsgCid, lres.MsgCid)
+	if vRes.MsgCid != lRes.MsgCid {
+		return fmt.Errorf("msg cid not match %v != %v", vRes.MsgCid, lRes.MsgCid)
 	}
-	if err := checkByJSON(vres.MsgRct, lres.MsgRct); err != nil {
-		return fmt.Errorf("msg receipt: %+v != %+v", vres.MsgRct, lres.MsgRct)
+	if err := checkByJSON(vRes.MsgRct, lRes.MsgRct); err != nil {
+		return fmt.Errorf("msg receipt: %+v != %+v", vRes.MsgRct, lRes.MsgRct)
 	}
-	if err := checkByJSON(vres.GasCost, lres.GasCost); err != nil {
-		return fmt.Errorf("gas cost: %+v != %+v", vres.GasCost, lres.GasCost)
+	if err := checkByJSON(vRes.GasCost, lRes.GasCost); err != nil {
+		return fmt.Errorf("gas cost: %+v != %+v", vRes.GasCost, lRes.GasCost)
 	}
 
-	return check(vres.ExecutionTrace, lres.ExecutionTrace)
+	return check(vRes.ExecutionTrace, lRes.ExecutionTrace)
 }
 
 func check(vTrace types.ExecutionTrace, lTrace ltypes.ExecutionTrace) error {
@@ -309,9 +310,9 @@ func resultCheckWithInvocResult(msg cid.Cid, o1, o2 interface{}) error {
 	return nil
 }
 
-func toInterface(objs ...interface{}) []interface{} {
-	i := make([]interface{}, 0, len(objs))
-	i = append(i, objs...)
+func toInterface(list ...interface{}) []interface{} {
+	i := make([]interface{}, 0, len(list))
+	i = append(i, list...)
 
 	return i
 }
