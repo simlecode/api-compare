@@ -20,19 +20,19 @@ func newCompareMgr(ctx context.Context,
 	lAPI api.FullNode,
 	dp *dataProvider,
 	r *register,
-	currTS *types.TipSet,
+	currentTS *types.TipSet,
 ) *compareMgr {
-	cmgr := &compareMgr{
-		ctx:      ctx,
-		vAPI:     vAPI,
-		lAPI:     lAPI,
-		dp:       dp,
-		currTS:   currTS,
-		register: r,
-		next:     make(chan struct{}, 10),
+	mgr := &compareMgr{
+		ctx:       ctx,
+		vAPI:      vAPI,
+		lAPI:      lAPI,
+		dp:        dp,
+		currentTS: currentTS,
+		register:  r,
+		next:      make(chan struct{}, 10),
 	}
 
-	return cmgr
+	return mgr
 }
 
 type compareMgr struct {
@@ -44,29 +44,30 @@ type compareMgr struct {
 	dp       *dataProvider
 	register *register
 
-	currTS *types.TipSet
+	currentTS *types.TipSet
 
 	next chan struct{}
 }
 
-func (cmgr *compareMgr) start() {
-	if err := cmgr.chainNotify(); err != nil {
+func (mgr *compareMgr) start() {
+	if err := mgr.chainNotify(); err != nil {
 		logrus.Fatalf("chain notify error: %v\n", err)
 	}
 
 	compare := func(h abi.ChainEpoch) {
-		ts, err := cmgr.findTSByHeight(h)
+		ts, err := mgr.findTSByHeight(h)
 		if err != nil {
 			logrus.Errorf("found ts failed %v error %v", h, err)
+			return
 		}
-		cmgr.currTS = ts
+		mgr.currentTS = ts
 
-		if err := cmgr.compareAPI(); err != nil {
+		if err := mgr.compareAPI(); err != nil {
 			logrus.Errorf("compare api error: %v", err)
 		}
 	}
 
-	h := cmgr.currTS.Height() - defaultConfidence
+	h := mgr.currentTS.Height() - defaultConfidence
 	if h < 0 {
 		h = 0
 	}
@@ -74,47 +75,46 @@ func (cmgr *compareMgr) start() {
 
 	for {
 		select {
-		case <-cmgr.ctx.Done():
+		case <-mgr.ctx.Done():
 			logrus.Warn("context done")
 			return
-		case <-cmgr.next:
-			compare(cmgr.currTS.Height() + 1)
+		case <-mgr.next:
+			compare(mgr.currentTS.Height() + 1)
 		}
 	}
 }
 
-func (cmgr *compareMgr) chainNotify() error {
-	notifs, err := cmgr.vAPI.ChainNotify(cmgr.ctx)
+func (mgr *compareMgr) chainNotify() error {
+	notifies, err := mgr.vAPI.ChainNotify(mgr.ctx)
 	if err != nil {
 		return err
 	}
 
 	select {
-	case noti := <-notifs:
-		if len(noti) != 1 {
-			return fmt.Errorf("expect hccurrent length 1 but for %d", len(noti))
+	case notify := <-notifies:
+		if len(notify) != 1 {
+			return fmt.Errorf("expect hccurrent length 1 but for %d", len(notify))
 		}
 
-		if noti[0].Type != types.HCCurrent {
-			return fmt.Errorf("expect hccurrent event but got %s ", noti[0].Type)
+		if notify[0].Type != types.HCCurrent {
+			return fmt.Errorf("expect hccurrent event but got %s ", notify[0].Type)
 		}
-		// cmgr.latestTS = noti[0].Val
-	case <-cmgr.ctx.Done():
-		return cmgr.ctx.Err()
+	case <-mgr.ctx.Done():
+		return mgr.ctx.Err()
 	}
 
 	go func() {
-		for notif := range notifs {
+		for notify := range notifies {
 			var apply []*types.TipSet
 
-			for _, change := range notif {
+			for _, change := range notify {
 				switch change.Type {
 				case types.HCApply:
 					apply = append(apply, change.Val)
 				}
 			}
-			if apply[0].Height() > (cmgr.currTS.Height() + defaultConfidence) {
-				cmgr.next <- struct{}{}
+			if apply[0].Height() > (mgr.currentTS.Height() + defaultConfidence) {
+				mgr.next <- struct{}{}
 			}
 		}
 	}()
@@ -122,12 +122,12 @@ func (cmgr *compareMgr) chainNotify() error {
 	return nil
 }
 
-func (cmgr *compareMgr) findTSByHeight(h abi.ChainEpoch) (*types.TipSet, error) {
-	vts, err := cmgr.vAPI.ChainGetTipSetAfterHeight(cmgr.ctx, h, types.EmptyTSK)
+func (mgr *compareMgr) findTSByHeight(h abi.ChainEpoch) (*types.TipSet, error) {
+	vts, err := mgr.vAPI.ChainGetTipSetAfterHeight(mgr.ctx, h, types.EmptyTSK)
 	if err != nil {
 		return nil, err
 	}
-	lts, err := cmgr.lAPI.ChainGetTipSetAfterHeight(cmgr.ctx, h, ltypes.EmptyTSK)
+	lts, err := mgr.lAPI.ChainGetTipSetAfterHeight(mgr.ctx, h, ltypes.EmptyTSK)
 	if err != nil {
 		return nil, err
 	}
@@ -136,27 +136,27 @@ func (cmgr *compareMgr) findTSByHeight(h abi.ChainEpoch) (*types.TipSet, error) 
 		return nil, fmt.Errorf("height not match %d != %d", vts.Height(), lts.Height())
 	}
 	if !vts.Key().Equals(types.NewTipSetKey(lts.Cids()...)) {
-		return nil, fmt.Errorf("cids not match %v != %v", vts.Cids(), lts.Cids())
+		return nil, fmt.Errorf("key not match %v != %v", vts.Key(), lts.Key())
 	}
 
 	return vts, nil
 }
 
-func (cmgr *compareMgr) compareAPI() error {
-	if err := cmgr.dp.reset(cmgr.currTS); err != nil {
+func (mgr *compareMgr) compareAPI() error {
+	if err := mgr.dp.reset(mgr.currentTS); err != nil {
 		return err
 	}
-	logrus.Infof("start compare %d methods, height %d", len(cmgr.register.funcs), cmgr.currTS.Height())
+	logrus.Infof("start compare %d methods, height %d", len(mgr.register.funcs), mgr.currentTS.Height())
 
 	sorted := make([]struct {
 		name string
-		f    rfunc
-	}, 0, len(cmgr.register.funcs))
+		f    rf
+	}, 0, len(mgr.register.funcs))
 
-	for name, f := range cmgr.register.funcs {
+	for name, f := range mgr.register.funcs {
 		sorted = append(sorted, struct {
 			name string
-			f    rfunc
+			f    rf
 		}{name: name, f: f})
 	}
 	sort.Slice(sorted, func(i, j int) bool {
@@ -175,7 +175,7 @@ func (cmgr *compareMgr) compareAPI() error {
 		f := v.f
 		go func() {
 			defer wg.Done()
-			cmgr.printResult(name, f())
+			mgr.printResult(name, f())
 		}()
 
 	}
@@ -186,7 +186,7 @@ func (cmgr *compareMgr) compareAPI() error {
 	return nil
 }
 
-func (cmgr *compareMgr) printResult(method string, err error) {
+func (mgr *compareMgr) printResult(method string, err error) {
 	if err != nil {
 		logrus.Errorf("compare %s failed: %v \n", method, err)
 	} else {

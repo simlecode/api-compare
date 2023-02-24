@@ -7,18 +7,18 @@ import (
 
 func newRegister() *register {
 	return &register{
-		funcs: map[string]rfunc{},
+		funcs: map[string]rf{},
 	}
 }
 
 type register struct {
-	funcs map[string]rfunc
+	funcs map[string]rf
 }
 
-type rfunc func() error
+type rf func() error
 
 // nolint
-func (r *register) registerFunc(name string, f rfunc) {
+func (r *register) registerFunc(name string, f rf) {
 	r.funcs[name] = f
 }
 

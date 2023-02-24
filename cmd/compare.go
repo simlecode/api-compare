@@ -69,21 +69,21 @@ func (ac *apiCompare) CompareStateAccountKey() error {
 		return nil
 	}
 
-	req := newReq(stateAccountKey, toInterface(addr, ac.dp.currTS.Key()))
+	req := newReq(stateAccountKey, toInterface(addr, ac.dp.currentTS.Key()))
 	ac.handler.send(req)
 
 	return <-req.err
 }
 
 func (ac *apiCompare) CompareChainGetTipSet() error {
-	req := newReq(chainGetTipSet, []interface{}{ac.ctx, ac.dp.currTS.Key()})
+	req := newReq(chainGetTipSet, []interface{}{ac.ctx, ac.dp.currentTS.Key()})
 	ac.handler.send(req)
 
 	return <-req.err
 }
 
 func (ac *apiCompare) CompareChainGetTipSetByHeight() error {
-	ts := ac.dp.currTS
+	ts := ac.dp.currentTS
 	height := ts.Height() - 10
 	key := ts.Key()
 
@@ -103,12 +103,12 @@ func (ac *apiCompare) CompareChainGetTipSetByHeight() error {
 
 func (ac *apiCompare) CompareStateGetRandomnessFromBeacon() error {
 	per := crypto.DomainSeparationTag_TicketProduction
-	randEpoch := ac.dp.currTS.Height()
-	emtropy := []byte("fixed-randomness")
-	key := ac.dp.currTS.Key()
+	randEpoch := ac.dp.currentTS.Height()
+	entropy := []byte("fixed-randomness")
+	key := ac.dp.currentTS.Key()
 
 	for per < crypto.DomainSeparationTag_PoStChainCommit {
-		req := newReq(stateGetRandomnessFromBeacon, []interface{}{ac.ctx, per, randEpoch, emtropy, key})
+		req := newReq(stateGetRandomnessFromBeacon, []interface{}{ac.ctx, per, randEpoch, entropy, key})
 		ac.handler.send(req)
 		if err := <-req.err; err != nil {
 			return err
@@ -120,7 +120,7 @@ func (ac *apiCompare) CompareStateGetRandomnessFromBeacon() error {
 }
 
 func (ac *apiCompare) CompareStateGetBeaconEntry() error {
-	height := ac.dp.currTS.Height()
+	height := ac.dp.currentTS.Height()
 
 	req := newReq(stateGetBeaconEntry, []interface{}{ac.ctx, height})
 	ac.handler.send(req)
@@ -129,7 +129,7 @@ func (ac *apiCompare) CompareStateGetBeaconEntry() error {
 }
 
 func (ac *apiCompare) CompareChainGetBlock() error {
-	for _, blk := range ac.dp.currTS.Blocks() {
+	for _, blk := range ac.dp.currentTS.Blocks() {
 		req := newReq(chainGetBlock, []interface{}{ac.ctx, blk.Cid()})
 		ac.handler.send(req)
 		if err := <-req.err; err != nil {
@@ -141,7 +141,7 @@ func (ac *apiCompare) CompareChainGetBlock() error {
 }
 
 func (ac *apiCompare) CompareChainGetBlockMessages() error {
-	for _, blk := range ac.dp.currTS.Blocks() {
+	for _, blk := range ac.dp.currentTS.Blocks() {
 		req := newReq(chainGetBlockMessages, []interface{}{ac.ctx, blk.Cid()}, withResultCheck(func(r1, r2 interface{}) error {
 			// todo: compare all
 			msgs, _ := r1.(*types.BlockMessages)
@@ -169,7 +169,7 @@ func (ac *apiCompare) CompareChainGetBlockMessages() error {
 }
 
 func (ac *apiCompare) CompareChainGetMessage() error {
-	for _, blk := range ac.dp.currTS.Blocks() {
+	for _, blk := range ac.dp.currentTS.Blocks() {
 		blkMsgs, err := ac.vAPI.ChainGetBlockMessages(ac.ctx, blk.Cid())
 		if err != nil {
 			return fmt.Errorf("failed to get block %s messages: %v", blk.Cid(), err)
@@ -189,7 +189,7 @@ func (ac *apiCompare) CompareChainGetMessage() error {
 }
 
 func (ac *apiCompare) CompareChainGetMessagesInTipset() error {
-	key := ac.dp.currTS.Key()
+	key := ac.dp.currentTS.Key()
 
 	req := newReq(chainGetMessagesInTipset, []interface{}{ac.ctx, key}, withResultCheck(resultCheckWithEqual))
 	ac.handler.send(req)
@@ -201,7 +201,7 @@ func (ac *apiCompare) CompareChainGetMessagesInTipset() error {
 }
 
 func (ac *apiCompare) CompareChainGetParentMessages() error {
-	for _, blkCID := range ac.dp.currTS.Cids() {
+	for _, blkCID := range ac.dp.currentTS.Cids() {
 		req := newReq(chainGetParentMessages, []interface{}{ac.ctx, blkCID}, withResultCheck(resultCheckWithEqual))
 		ac.handler.send(req)
 		if err := <-req.err; err != nil {
@@ -213,7 +213,7 @@ func (ac *apiCompare) CompareChainGetParentMessages() error {
 }
 
 func (ac *apiCompare) CompareChainGetParentReceipts() error {
-	for _, blkCID := range ac.dp.currTS.Cids() {
+	for _, blkCID := range ac.dp.currentTS.Cids() {
 		req := newReq(chainGetParentReceipts, toInterface(ac.ctx, blkCID))
 		ac.handler.send(req)
 		if err := <-req.err; err != nil {
@@ -225,7 +225,7 @@ func (ac *apiCompare) CompareChainGetParentReceipts() error {
 }
 
 func (ac *apiCompare) CompareStateVerifiedRegistryRootKey() error {
-	key := ac.dp.currTS.Key()
+	key := ac.dp.currentTS.Key()
 	req := newReq(stateVerifiedRegistryRootKey, toInterface(ac.ctx, key))
 	ac.handler.send(req)
 
@@ -233,7 +233,7 @@ func (ac *apiCompare) CompareStateVerifiedRegistryRootKey() error {
 }
 
 func (ac *apiCompare) CompareStateVerifierStatus() error {
-	key := ac.dp.currTS.Key()
+	key := ac.dp.currentTS.Key()
 	req := newReq(stateVerifierStatus, toInterface(ac.ctx, ac.dp.defaultMiner(), key), withResultCheck(func(r1, r2 interface{}) error {
 		o1, _ := r1.(*big.Int)
 		o2, _ := r2.(*big.Int)
@@ -252,7 +252,7 @@ func (ac *apiCompare) CompareStateNetworkName() error {
 }
 
 func (ac *apiCompare) CompareSearchWaitMessage() error {
-	key := ac.dp.currTS.Key()
+	key := ac.dp.currentTS.Key()
 	searchMsg := func(msgCID cid.Cid) error {
 		req := newReq(stateSearchMsg, toInterface(ac.ctx, key, msgCID, constants.LookbackNoLimit, true))
 		ac.handler.send(req)
@@ -283,7 +283,7 @@ func (ac *apiCompare) CompareSearchWaitMessage() error {
 }
 
 func (ac *apiCompare) CompareStateNetworkVersion() error {
-	key := ac.dp.currTS.Key()
+	key := ac.dp.currentTS.Key()
 	req := newReq(stateNetworkVersion, toInterface(ac.ctx, key))
 	ac.handler.send(req)
 
@@ -291,7 +291,7 @@ func (ac *apiCompare) CompareStateNetworkVersion() error {
 }
 
 func (ac *apiCompare) CompareChainGetPath() error {
-	ts := ac.dp.currTS
+	ts := ac.dp.currentTS
 	from, err := ac.vAPI.ChainGetTipSetAfterHeight(ac.ctx, ts.Height()-5, ts.Key())
 	if err != nil {
 		return err
@@ -355,8 +355,8 @@ func (ac *apiCompare) CompareStateReplay() error {
 }
 
 func (ac *apiCompare) CompareMinerGetBaseInfo() error {
-	height := ac.dp.currTS.Height()
-	key := ac.dp.currTS.Parents()
+	height := ac.dp.currentTS.Height()
+	key := ac.dp.currentTS.Parents()
 
 	return ac.sendAndWait(minerGetBaseInfo, toInterface(ac.ctx, ac.dp.defaultMiner(), height, key))
 }
@@ -368,7 +368,7 @@ func (ac *apiCompare) CompareStateReadState() error {
 	if addr == address.Undef {
 		addr = ac.dp.defaultMiner()
 	}
-	key := ac.dp.currTS.Key()
+	key := ac.dp.currentTS.Key()
 
 	return ac.sendAndWait(stateReadState, toInterface(ac.ctx, addr, key))
 }
@@ -378,7 +378,7 @@ func (ac *apiCompare) CompareStateListMessages() error {
 	if from.Empty() {
 		return nil
 	}
-	height := ac.dp.currTS.Height() - 20
+	height := ac.dp.currentTS.Height() - 20
 
 	return ac.sendAndWait(stateListMessages, toInterface(ac.ctx, &types.MessageMatch{From: from}, types.EmptyTSK, height))
 }
@@ -446,10 +446,10 @@ func (ac *apiCompare) CompareEthAddressToFilecoinAddress() error {
 
 func (ac *apiCompare) CompareEthBlockNumber() error {
 	check := func(r1, r2 interface{}) error {
-		vnum, _ := r1.(types.EthUint64)
-		lnum, _ := r2.(ethtypes.EthUint64)
-		if math.Abs(float64(uint64(vnum)-uint64(lnum))) > 1 {
-			return fmt.Errorf("not match %d != %d, may sync slow", vnum, lnum)
+		vNum, _ := r1.(types.EthUint64)
+		lNum, _ := r2.(ethtypes.EthUint64)
+		if math.Abs(float64(uint64(vNum)-uint64(lNum))) > 1 {
+			return fmt.Errorf("not match %d != %d, may sync slow", vNum, lNum)
 		}
 		return nil
 	}
@@ -458,7 +458,7 @@ func (ac *apiCompare) CompareEthBlockNumber() error {
 }
 
 func (ac *apiCompare) CompareEthGetBlockTransactionCountByNumber() error {
-	height := ac.dp.currTS.Height()
+	height := ac.dp.currentTS.Height()
 
 	return ac.sendAndWait(ethGetBlockTransactionCountByNumber, toInterface(ac.ctx, types.EthUint64(height)))
 }
@@ -480,12 +480,12 @@ func (ac *apiCompare) CompareEthGetBlockByHash() error {
 
 	var fullTxInfo bool
 	if err := ac.sendAndWait(ethGetBlockByHash, toInterface(ac.ctx, blkHash, fullTxInfo)); err != nil {
-		return fmt.Errorf("fullTxInfo: false, blkhash %s, error: %v", blkHash.ToCid(), err)
+		return fmt.Errorf("fullTxInfo: false, block hash %s, error: %v", blkHash.ToCid(), err)
 	}
 
 	fullTxInfo = true
 	if err := ac.sendAndWait(ethGetBlockByHash, toInterface(ac.ctx, blkHash, fullTxInfo)); err != nil {
-		return fmt.Errorf("fullTxInfo: true,  blkhash %s, error: %v", blkHash.ToCid(), err)
+		return fmt.Errorf("fullTxInfo: true,  block hash %s, error: %v", blkHash.ToCid(), err)
 	}
 
 	return nil
@@ -549,7 +549,7 @@ func (ac *apiCompare) CompareEthGetTransactionByBlockHashAndIndex() error {
 }
 
 func (ac *apiCompare) CompareEthGetTransactionByBlockNumberAndIndex() error {
-	height := ac.dp.currTS.Height()
+	height := ac.dp.currentTS.Height()
 	return ac.sendAndWait(ethGetTransactionByBlockNumberAndIndex, toInterface(ac.ctx, types.EthUint64(height), types.EthUint64(0)))
 }
 

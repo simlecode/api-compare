@@ -65,14 +65,14 @@ func (h *handler) start() {
 			go func() {
 				defer done()
 
-				r.err <- h.compare(r)
+				r.err <- h.call(r)
 				close(r.err)
 			}()
 		}
 	}
 }
 
-func (h *handler) compare(r *req) error {
+func (h *handler) call(r *req) error {
 	logrus.Debugf("start handler compare %v", r.methodName)
 	defer func() {
 		logrus.Debugf("end handler compare %v", r.methodName)
@@ -99,75 +99,75 @@ func (h *handler) compare(r *req) error {
 		inParams2 = append(inParams2, reflect.ValueOf(tryConvertParam(param)))
 	}
 
-	var vres, lres []reflect.Value
+	var vRes, lRes []reflect.Value
 	wg := sync.WaitGroup{}
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		vres = vm.Func.Call(append([]reflect.Value{h.vAPI.rv}, inParams...))
+		vRes = vm.Func.Call(append([]reflect.Value{h.vAPI.rv}, inParams...))
 	}()
 	go func() {
 		defer wg.Done()
-		lres = lm.Func.Call(append([]reflect.Value{h.lAPI.rv}, inParams2...))
+		lRes = lm.Func.Call(append([]reflect.Value{h.lAPI.rv}, inParams2...))
 	}()
 	wg.Wait()
 
-	if len(vres) == 0 {
-		return h.handleError(vres[0], lres[0])
+	if len(vRes) == 0 {
+		return h.handleError(vRes[0], lRes[0])
 	}
 
-	if len(vres) == 2 {
-		if err := h.handleError(vres[1], lres[1]); err != nil && !r.expectCallAPIError {
+	if len(vRes) == 2 {
+		if err := h.handleError(vRes[1], lRes[1]); err != nil && !r.expectCallAPIError {
 			return err
 		}
 	}
-	logrus.Tracef("call %s result: \n%+v\n%+v", r.methodName, vres[0].Interface(), lres[0].Interface())
+	logrus.Tracef("call %s result: \n%+v\n%+v", r.methodName, vRes[0].Interface(), lRes[0].Interface())
 
 	if r.resultChecker != nil {
-		return r.resultChecker(vres[0].Interface(), lres[0].Interface())
+		return r.resultChecker(vRes[0].Interface(), lRes[0].Interface())
 	}
 
-	return checkByJSON(vres[0].Interface(), lres[0].Interface())
+	return checkByJSON(vRes[0].Interface(), lRes[0].Interface())
 }
 
 // todo: not check each param
 func tryConvertParam(param interface{}) interface{} {
-	vkey, ok := param.(types.TipSetKey)
+	key, ok := param.(types.TipSetKey)
 	if ok {
-		return toLoutsTipsetKey(types.TipSetKey(vkey))
+		return toLoutsTipsetKey(types.TipSetKey(key))
 	}
-	vmsg, ok := param.(*types.Message)
+	msg, ok := param.(*types.Message)
 	if ok {
-		return toLotusMsg(vmsg)
+		return toLotusMsg(msg)
 	}
-	vnum, ok := param.(types.EthUint64)
+	num, ok := param.(types.EthUint64)
 	if ok {
-		return ethtypes.EthUint64(vnum)
+		return ethtypes.EthUint64(num)
 	}
-	vhash, ok := param.(types.EthHash)
+	hash, ok := param.(types.EthHash)
 	if ok {
-		return ethtypes.EthHash(vhash)
+		return ethtypes.EthHash(hash)
 	}
-	vptrHash, ok := param.(*types.EthHash)
+	ptrHash, ok := param.(*types.EthHash)
 	if ok {
-		return (*ethtypes.EthHash)(vptrHash)
+		return (*ethtypes.EthHash)(ptrHash)
 	}
-	vaddr, ok := param.(types.EthAddress)
+	addr, ok := param.(types.EthAddress)
 	if ok {
-		return ethtypes.EthAddress(vaddr)
+		return ethtypes.EthAddress(addr)
 	}
-	vcall, ok := param.(types.EthCall)
+	call, ok := param.(types.EthCall)
 	if ok {
-		return toLotusEthCall(vcall)
+		return toLotusEthCall(call)
 	}
-	vbytes, ok := param.(types.EthBytes)
+	bytes, ok := param.(types.EthBytes)
 	if ok {
-		return ethtypes.EthBytes(vbytes)
+		return ethtypes.EthBytes(bytes)
 	}
-	vmsgMatch, ok := param.(*types.MessageMatch)
+	msgMatch, ok := param.(*types.MessageMatch)
 	if ok {
-		return toLotusEthMessageMatch(vmsgMatch)
+		return toLotusEthMessageMatch(msgMatch)
 	}
 
 	return param

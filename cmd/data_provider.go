@@ -29,7 +29,7 @@ type dataProvider struct {
 	ctx context.Context
 	api v1.FullNode
 
-	currTS *types.TipSet
+	currentTS *types.TipSet
 
 	dataSet *dataSet
 }
@@ -46,13 +46,13 @@ func (dp *dataProvider) reset(ts *types.TipSet) error {
 	if ts.Len() == 0 {
 		return fmt.Errorf("ts is empty")
 	}
-	dp.currTS = ts
+	dp.currentTS = ts
 
 	return dp.generateData()
 }
 
 func (dp *dataProvider) generateData() error {
-	blk := dp.currTS.Blocks()[0].Cid()
+	blk := dp.currentTS.Blocks()[0].Cid()
 	blkMsgs, err := dp.api.ChainGetParentMessages(dp.ctx, blk)
 	if err != nil {
 		return err
@@ -68,7 +68,7 @@ func (dp *dataProvider) generateData() error {
 	ids := make(map[address.Address]struct{}, msgLen)
 	senders := make(map[address.Address]struct{}, msgLen)
 	msgs := make([]*types.Message, 0, msgLen)
-	msgWithEventRoot := make([]*types.Message, 0, 0)
+	msgWithEventRoot := make([]*types.Message, 0)
 	for i, msg := range blkMsgs {
 		receipt := receipts[i]
 		if receipt.ExitCode.IsError() {
@@ -142,7 +142,7 @@ func (dp *dataProvider) defaultMiner() address.Address {
 }
 
 func (dp *dataProvider) getBlkOptByHeight() (string, error) {
-	d, err := types.EthUint64(dp.currTS.Height()).MarshalJSON()
+	d, err := types.EthUint64(dp.currentTS.Height()).MarshalJSON()
 	if err != nil {
 		return "", err
 	}
@@ -152,7 +152,7 @@ func (dp *dataProvider) getBlkOptByHeight() (string, error) {
 }
 
 func (dp *dataProvider) getBlockHash() (types.EthHash, ethtypes.EthHash, error) {
-	c, err := dp.currTS.Key().Cid()
+	c, err := dp.currentTS.Key().Cid()
 	if err != nil {
 		return emptyEthHash, emptyLEthHash, err
 	}

@@ -17,7 +17,7 @@ const (
 	defaultConfidence = 5
 )
 
-var Cmds = cli.Command{}
+var Commands = cli.Command{}
 
 func Run(cctx *cli.Context) error {
 	vURL := cctx.String("venus-url")
@@ -31,24 +31,24 @@ func Run(cctx *cli.Context) error {
 	ctx, cancel := context.WithCancel(cctx.Context)
 	defer cancel()
 
-	vAPI, vclose, err := v1.DialFullNodeRPC(ctx, vURL, vToken, nil)
+	vAPI, vClose, err := v1.DialFullNodeRPC(ctx, vURL, vToken, nil)
 	if err != nil {
 		return fmt.Errorf("create venus rpc error: %v", err)
 	}
-	defer vclose()
+	defer vClose()
 
-	lAPI, lclose, err := newLotusFullNodeRPCV1(ctx, lURL, lToken)
+	lAPI, lClose, err := newLotusFullNodeRPCV1(ctx, lURL, lToken)
 	if err != nil {
 		return fmt.Errorf("create lotus rpc error: %v", err)
 	}
-	defer lclose()
+	defer lClose()
 
 	head, err := vAPI.ChainHead(ctx)
 	if err != nil {
 		return err
 	}
 
-	var currTS *types.TipSet
+	var currentTS *types.TipSet
 	var startHeight abi.ChainEpoch
 	if cctx.IsSet("start-height") {
 		startHeight = abi.ChainEpoch(cctx.Int("start-height"))
@@ -61,7 +61,7 @@ func Run(cctx *cli.Context) error {
 	if startHeight < 0 {
 		startHeight = 0
 	}
-	currTS, err = vAPI.ChainGetTipSetAfterHeight(ctx, startHeight, types.EmptyTSK)
+	currentTS, err = vAPI.ChainGetTipSetAfterHeight(ctx, startHeight, types.EmptyTSK)
 	if err != nil {
 		return err
 	}
@@ -82,8 +82,8 @@ func Run(cctx *cli.Context) error {
 		return err
 	}
 
-	cmgr := newCompareMgr(ctx, vAPI, lAPI, dp, r, currTS)
-	go cmgr.start()
+	mgr := newCompareMgr(ctx, vAPI, lAPI, dp, r, currentTS)
+	go mgr.start()
 
 	<-c
 
