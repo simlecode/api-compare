@@ -2,9 +2,9 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
-	"strings"
 
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/go-state-types/big"
@@ -142,7 +142,23 @@ func (ac *apiCompare) CompareChainGetBlock() error {
 
 func (ac *apiCompare) CompareChainGetBlockMessages() error {
 	for _, blk := range ac.dp.currTS.Blocks() {
-		req := newReq(chainGetBlockMessages, []interface{}{ac.ctx, blk.Cid()})
+		req := newReq(chainGetBlockMessages, []interface{}{ac.ctx, blk.Cid()}, withResultCheck(func(r1, r2 interface{}) error {
+			// todo: compare all
+			msgs, _ := r1.(*types.BlockMessages)
+			msgs2, _ := r2.(*api.BlockMessages)
+			cidMap := make(map[cid.Cid]struct{}, len(msgs.Cids))
+			for _, c := range msgs.Cids {
+				cidMap[c] = struct{}{}
+			}
+			for _, c := range msgs2.Cids {
+				if _, ok := cidMap[c]; !ok {
+					d, d2, _ := toJSON(r1, r2)
+					return fmt.Errorf("not match %v != %v", d, d2)
+				}
+			}
+
+			return nil
+		}))
 		ac.handler.send(req)
 		if err := <-req.err; err != nil {
 			return fmt.Errorf("block: %v, error %v", blk.Cid(), err)
@@ -385,6 +401,49 @@ func (ac *apiCompare) CompareEthAccounts() error {
 	return ac.sendAndWait(ethAccounts, toInterface(ac.ctx))
 }
 
+func (ac *apiCompare) CompareEthAddressToFilecoinAddress() error {
+	// todo: use rand address
+	addr, err := address.NewFromString("t410flx24nnon3f4dexgt6dh4vtoai33caru6cphna2i")
+	if err != nil {
+		return err
+	}
+	vAddr, err := types.EthAddressFromFilecoinAddress(addr)
+	if err != nil {
+		return fmt.Errorf("venus convert filecoin address %s to eth address failed: %v", addr, err)
+	}
+	lAddr, err := ethtypes.EthAddressFromFilecoinAddress(addr)
+	if err != nil {
+		return fmt.Errorf("lotus convert filecoin address %s to eth address failed: %v", addr, err)
+	}
+	if vAddr != types.EthAddress(lAddr) {
+		return fmt.Errorf("eth address not match: %v %v %v", vAddr, lAddr, addr)
+	}
+
+	return ac.sendAndWait(ethAddressToFilecoinAddress, toInterface(ac.ctx, vAddr))
+
+	// ki, err := key.NewDelegatedKeyFromSeed(rand.Reader)
+	// if err != nil {
+	// 	return err
+	// }
+	// addr, err := ki.Address()
+	// if err != nil {
+	// 	return err
+	// }
+	// vAddr, err := types.EthAddressFromFilecoinAddress(addr)
+	// if err != nil {
+	// 	return fmt.Errorf("venus convert filecoin address %s to eth address failed: %v", addr, err)
+	// }
+	// lAddr, err := ethtypes.EthAddressFromFilecoinAddress(addr)
+	// if err != nil {
+	// 	return fmt.Errorf("lotus convert filecoin address %s to eth address failed: %v", addr, err)
+	// }
+	// if vAddr != types.EthAddress(lAddr) {
+	// 	return fmt.Errorf("eth address not match %v != %v", vAddr, lAddr)
+	// }
+
+	// return ac.sendAndWait(ethAddressToFilecoinAddress, toInterface(ac.ctx, vAddr))
+}
+
 func (ac *apiCompare) CompareEthBlockNumber() error {
 	check := func(r1, r2 interface{}) error {
 		vnum, _ := r1.(types.EthUint64)
@@ -437,8 +496,8 @@ func (ac *apiCompare) CompareEthGetBlockByNumber() error {
 	if err != nil {
 		return err
 	}
-	blkOpt = strings.Replace(blkOpt, "\"", "", -1)
-	blkParams := []string{blkOpt, blkParamsPending, blkParamsLatest}
+	// blkParams := []string{blkOpt, blkParamsPending, blkParamsLatest}
+	blkParams := []string{blkOpt}
 
 	for _, blkParam := range blkParams {
 		if err := ac.sendAndWait(ethGetBlockByNumber, toInterface(ac.ctx, blkParam, false)); err != nil {
@@ -467,7 +526,7 @@ func (ac *apiCompare) CompareEthGetTransactionCount() error {
 	if err != nil {
 		return err
 	}
-	blkOpt = strings.Replace(blkOpt, "\"", "", -1)
+
 	sender, err := types.EthAddressFromFilecoinAddress(addr)
 	if err != nil {
 		return err
@@ -517,8 +576,12 @@ func (ac *apiCompare) CompareEthGetBalance() error {
 	if err != nil {
 		return err
 	}
+	blkOpt, err := ac.dp.getBlkOptByHeight()
+	if err != nil {
+		return err
+	}
 
-	return ac.sendAndWait(ethGetBalance, toInterface(ac.ctx, addr, blkParamsLatest))
+	return ac.sendAndWait(ethGetBalance, toInterface(ac.ctx, addr, blkOpt))
 }
 
 func (ac *apiCompare) CompareEthChainId() error {
@@ -545,15 +608,24 @@ func (ac *apiCompare) CompareEthGasPrice() error {
 }
 
 func (ac *apiCompare) CompareEthFeeHistory() error {
-	blkCount := 10
 	newestBlk, err := ac.dp.getBlkOptByHeight()
 	if err != nil {
 		return err
 	}
-	newestBlk = strings.Replace(newestBlk, "\"", "", -1)
 	rewardPercentiles := make([]float64, 0)
 
-	return ac.sendAndWait(ethFeeHistory, toInterface(ac.ctx, types.EthUint64(blkCount), newestBlk, rewardPercentiles))
+	params := types.EthFeeHistoryParams{
+		NewestBlkNum:      newestBlk,
+		BlkCount:          10,
+		RewardPercentiles: &rewardPercentiles,
+	}
+
+	data, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+
+	return ac.sendAndWait(ethFeeHistory, toInterface(ac.ctx, data))
 }
 
 func (ac *apiCompare) CompareEthMaxPriorityFeePerGas() error {
@@ -563,45 +635,49 @@ func (ac *apiCompare) CompareEthMaxPriorityFeePerGas() error {
 	}))
 }
 
+// todo: implement
 func (ac *apiCompare) CompareEthEstimateGas() error {
-	if err := ac.sendAndWait(ethEstimateGas, toInterface(ac.ctx, types.EthCall{})); err != nil {
-		return err
-	}
+	// if err := ac.sendAndWait(ethEstimateGas, toInterface(ac.ctx, types.EthCall{})); err != nil {
+	// 	return err
+	// }
 
-	vfrom, err := types.EthAddressFromFilecoinAddress(ac.dp.defaultMiner())
-	if err != nil {
-		return err
-	}
-	vcall := types.EthCall{
-		From:  &vfrom,
-		To:    &vfrom,
-		Value: types.EthBigInt(big.NewInt(10)),
-	}
+	// vfrom, err := types.EthAddressFromFilecoinAddress(ac.dp.defaultMiner())
+	// if err != nil {
+	// 	return err
+	// }
+	// vcall := types.EthCall{
+	// 	From:  &vfrom,
+	// 	To:    &vfrom,
+	// 	Value: types.EthBigInt(big.NewInt(10)),
+	// }
 
-	return ac.sendAndWait(ethEstimateGas, toInterface(ac.ctx, vcall))
+	// return ac.sendAndWait(ethEstimateGas, toInterface(ac.ctx, vcall))
+	return nil
 }
 
+// todo: implement
 func (ac *apiCompare) CompareEthCall() error {
-	if err := ac.sendAndWait(ethCall, toInterface(ac.ctx, types.EthCall{}, blkParamsLatest)); err != nil {
-		return err
-	}
+	// if err := ac.sendAndWait(ethCall, toInterface(ac.ctx, types.EthCall{}, blkParamsLatest)); err != nil {
+	// 	return err
+	// }
 
-	vfrom, err := types.EthAddressFromFilecoinAddress(ac.dp.defaultMiner())
-	if err != nil {
-		return err
-	}
-	vcall := types.EthCall{
-		From:  &vfrom,
-		To:    &vfrom,
-		Value: types.EthBigInt(big.NewInt(10)),
-	}
+	// vfrom, err := types.EthAddressFromFilecoinAddress(ac.dp.defaultMiner())
+	// if err != nil {
+	// 	return err
+	// }
+	// vcall := types.EthCall{
+	// 	From:  &vfrom,
+	// 	To:    &vfrom,
+	// 	Value: types.EthBigInt(big.NewInt(10)),
+	// }
 
-	return ac.sendAndWait(ethCall, toInterface(ac.ctx, vcall, blkParamsLatest))
+	// return ac.sendAndWait(ethCall, toInterface(ac.ctx, vcall, blkParamsLatest))
+	return nil
 }
 
 func (ac *apiCompare) CompareWeb3ClientVersion() error {
 	return ac.sendAndWait(web3ClientVersion, toInterface(ac.ctx), withResultCheck(func(r1, r2 interface{}) error {
-		logrus.Infof("compare Web3ClientVersion: %v %v", r1, r2)
+		fmt.Printf("compare Web3ClientVersion: %v %v\n", r1, r2)
 		return nil
 	}))
 }

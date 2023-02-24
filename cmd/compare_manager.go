@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/filecoin-project/go-state-types/abi"
 	"github.com/filecoin-project/lotus/api"
 	ltypes "github.com/filecoin-project/lotus/chain/types"
 	v1 "github.com/filecoin-project/venus/venus-shared/api/chain/v1"
@@ -43,8 +44,7 @@ type compareMgr struct {
 	dp       *dataProvider
 	register *register
 
-	currTS   *types.TipSet
-	latestTS *types.TipSet
+	currTS *types.TipSet
 
 	next chan struct{}
 }
@@ -54,8 +54,23 @@ func (cmgr *compareMgr) start() {
 		logrus.Fatalf("chain notify error: %v\n", err)
 	}
 
-	first := true
-	cmgr.next <- struct{}{}
+	compare := func(h abi.ChainEpoch) {
+		ts, err := cmgr.findTSByHeight(h)
+		if err != nil {
+			logrus.Errorf("found ts failed %v error %v", h, err)
+		}
+		cmgr.currTS = ts
+
+		if err := cmgr.compareAPI(); err != nil {
+			logrus.Errorf("compare api error: %v", err)
+		}
+	}
+
+	h := cmgr.currTS.Height() - defaultConfidence
+	if h < 0 {
+		h = 0
+	}
+	compare(h)
 
 	for {
 		select {
@@ -63,19 +78,7 @@ func (cmgr *compareMgr) start() {
 			logrus.Warn("context done")
 			return
 		case <-cmgr.next:
-			if first {
-				first = false
-			} else {
-				ts, err := cmgr.findNextTS(cmgr.currTS)
-				if err != nil {
-					logrus.Fatal(err)
-				}
-				cmgr.currTS = ts
-
-			}
-			if err := cmgr.compareAPI(); err != nil {
-				logrus.Errorf("compare api error: %v", err)
-			}
+			compare(cmgr.currTS.Height() + 1)
 		}
 	}
 }
@@ -95,7 +98,7 @@ func (cmgr *compareMgr) chainNotify() error {
 		if noti[0].Type != types.HCCurrent {
 			return fmt.Errorf("expect hccurrent event but got %s ", noti[0].Type)
 		}
-		cmgr.latestTS = noti[0].Val
+		// cmgr.latestTS = noti[0].Val
 	case <-cmgr.ctx.Done():
 		return cmgr.ctx.Err()
 	}
@@ -110,9 +113,7 @@ func (cmgr *compareMgr) chainNotify() error {
 					apply = append(apply, change.Val)
 				}
 			}
-			if apply[0].Height() > cmgr.latestTS.Height() {
-				cmgr.latestTS = apply[0]
-
+			if apply[0].Height() > (cmgr.currTS.Height() + defaultConfidence) {
 				cmgr.next <- struct{}{}
 			}
 		}
@@ -121,12 +122,12 @@ func (cmgr *compareMgr) chainNotify() error {
 	return nil
 }
 
-func (cmgr *compareMgr) findNextTS(currTS *types.TipSet) (*types.TipSet, error) {
-	vts, err := cmgr.vAPI.ChainGetTipSetAfterHeight(cmgr.ctx, currTS.Height()+1, types.EmptyTSK)
+func (cmgr *compareMgr) findTSByHeight(h abi.ChainEpoch) (*types.TipSet, error) {
+	vts, err := cmgr.vAPI.ChainGetTipSetAfterHeight(cmgr.ctx, h, types.EmptyTSK)
 	if err != nil {
 		return nil, err
 	}
-	lts, err := cmgr.lAPI.ChainGetTipSetAfterHeight(cmgr.ctx, currTS.Height()+1, ltypes.EmptyTSK)
+	lts, err := cmgr.lAPI.ChainGetTipSetAfterHeight(cmgr.ctx, h, ltypes.EmptyTSK)
 	if err != nil {
 		return nil, err
 	}
@@ -180,14 +181,14 @@ func (cmgr *compareMgr) compareAPI() error {
 	}
 	wg.Wait()
 
-	logrus.Infof("end compare methods took %v\n", time.Since(start))
+	logrus.Infof("end compare methods took %v\n\n", time.Since(start))
 
 	return nil
 }
 
 func (cmgr *compareMgr) printResult(method string, err error) {
 	if err != nil {
-		logrus.Errorf("compare %s failed, reason: %v \n", method, err)
+		logrus.Errorf("compare %s failed: %v \n", method, err)
 	} else {
 		logrus.Infof("compare %s success \n", method)
 	}

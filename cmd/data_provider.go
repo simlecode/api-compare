@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/filecoin-project/go-address"
 	"github.com/filecoin-project/lotus/chain/types/ethtypes"
@@ -51,28 +52,37 @@ func (dp *dataProvider) reset(ts *types.TipSet) error {
 }
 
 func (dp *dataProvider) generateData() error {
-	blkMsgs, err := dp.api.ChainGetBlockMessages(dp.ctx, dp.currTS.Blocks()[0].Cid())
+	blk := dp.currTS.Blocks()[0].Cid()
+	blkMsgs, err := dp.api.ChainGetParentMessages(dp.ctx, blk)
 	if err != nil {
 		return err
 	}
-	msgLen := len(blkMsgs.Cids)
+	receipts, err := dp.api.ChainGetParentReceipts(dp.ctx, blk)
+	if err != nil {
+		return err
+	}
+	if len(blkMsgs) != len(receipts) {
+		return fmt.Errorf("block %s message not match receipts, %d %d", blk, len(blkMsgs), len(receipts))
+	}
+	msgLen := len(blkMsgs)
 	ids := make(map[address.Address]struct{}, msgLen)
 	senders := make(map[address.Address]struct{}, msgLen)
 	msgs := make([]*types.Message, 0, msgLen)
-	for _, msg := range blkMsgs.BlsMessages {
-		msgs = append(msgs, msg)
-		if msg.To.Protocol() == address.ID {
-			ids[msg.To] = struct{}{}
+	msgWithEventRoot := make([]*types.Message, 0, 0)
+	for i, msg := range blkMsgs {
+		receipt := receipts[i]
+		if receipt.ExitCode.IsError() {
+			continue
 		}
-		senders[msg.From] = struct{}{}
-	}
-	for _, signedMsg := range blkMsgs.SecpkMessages {
-		msg := signedMsg.Message
-		msgs = append(msgs, &msg)
-		if msg.To.Protocol() == address.ID {
-			ids[msg.To] = struct{}{}
+		if msg.Message.To.Protocol() == address.ID {
+			ids[msg.Message.To] = struct{}{}
 		}
-		senders[msg.From] = struct{}{}
+		senders[msg.Message.From] = struct{}{}
+		if receipt.EventsRoot != nil {
+			msgWithEventRoot = append(msgWithEventRoot, msg.Message)
+			continue
+		}
+		msgs = append(msgs, msg.Message)
 	}
 
 	if len(ids) != 0 {
@@ -88,7 +98,7 @@ func (dp *dataProvider) generateData() error {
 		}
 	}
 	if len(msgs) != 0 {
-		dp.dataSet.blockMsgs = msgs
+		dp.dataSet.blockMsgs = append(msgWithEventRoot, msgs...)
 	}
 
 	return nil
@@ -136,8 +146,9 @@ func (dp *dataProvider) getBlkOptByHeight() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	h := strings.Replace(string(d), "\"", "", -1)
 
-	return string(d), nil
+	return h, nil
 }
 
 func (dp *dataProvider) getBlockHash() (types.EthHash, ethtypes.EthHash, error) {
@@ -156,6 +167,10 @@ func (dp *dataProvider) getBlockHash() (types.EthHash, ethtypes.EthHash, error) 
 		return emptyEthHash, emptyLEthHash, err
 	}
 
+	if blkHash != types.EthHash(blkHash2) {
+		return emptyEthHash, emptyLEthHash, fmt.Errorf("parse block hash not match %v %v %v", c, blkHash, blkHash2)
+	}
+
 	return blkHash, blkHash2, nil
 }
 
@@ -168,6 +183,12 @@ func (dp *dataProvider) getTxHash() (types.EthHash, ethtypes.EthHash, error) {
 			return emptyEthHash, emptyLEthHash, err
 		}
 		msgHash2, err := ethtypes.EthHashFromCid(msg.Cid())
+		if err != nil {
+			return emptyEthHash, emptyLEthHash, err
+		}
+		if msgHash != types.EthHash(msgHash2) {
+			return emptyEthHash, emptyLEthHash, fmt.Errorf("msg hash not match %v %v %v", msgHash, msgHash2, msg.Cid())
+		}
 
 		return msgHash, msgHash2, err
 	}

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -73,31 +72,83 @@ func toLotusEthCall(src types.EthCall) ethtypes.EthCall {
 }
 
 func checkByJSON(a, b interface{}) error {
-	d, err := json.Marshal(a)
+	d, d2, err := toJSON(a, b)
 	if err != nil {
-		return fmt.Errorf("failed to marshal 'a': %v", err)
-	}
-	d2, err := json.Marshal(b)
-	if err != nil {
-		return fmt.Errorf("failed to marshal 'b': %v", err)
+		return err
 	}
 
 	if string(d) == string(d2) {
 		return nil
 	}
 
-	return fmt.Errorf("json marshal result not match %s != %s", string(d), string(d2))
+	return fmt.Errorf("not match %s != %s", string(d), string(d2))
+}
+
+func toJSON(a, b interface{}) ([]byte, []byte, error) {
+	d, err := json.Marshal(a)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal 'a': %v", err)
+	}
+	d2, err := json.Marshal(b)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal 'b': %v", err)
+	}
+
+	return d, d2, nil
+}
+
+func unmarshalAny[T any](a interface{}) (T, error) {
+	var t T
+
+	d, err := json.Marshal(a)
+	if err != nil {
+		return t, fmt.Errorf("failed to marshal 'a': %v", err)
+	}
+
+	return t, json.Unmarshal(d, &t)
 }
 
 func checkInvocResult(vres *types.InvocResult, lres *lapi.InvocResult) error {
+	if vres.MsgCid != lres.MsgCid {
+		return fmt.Errorf("msg cid not match %v != %v", vres.MsgCid, lres.MsgCid)
+	}
+	if vres.Msg.Cid() != lres.Msg.Cid() {
+		return fmt.Errorf("msg not match %v != %v", vres.Msg, lres.Msg)
+	}
+	if vres.MsgCid != lres.MsgCid {
+		return fmt.Errorf("msg cid not match %v != %v", vres.MsgCid, lres.MsgCid)
+	}
 	if err := checkByJSON(vres.MsgRct, lres.MsgRct); err != nil {
-		return fmt.Errorf("%+v != %+v", vres.MsgRct, lres.MsgRct)
+		return fmt.Errorf("msg receipt: %+v != %+v", vres.MsgRct, lres.MsgRct)
 	}
 	if err := checkByJSON(vres.GasCost, lres.GasCost); err != nil {
-		return fmt.Errorf("%+v != %+v", vres.GasCost, lres.GasCost)
+		return fmt.Errorf("gas cost: %+v != %+v", vres.GasCost, lres.GasCost)
 	}
-	if err := checkByJSON(vres.ExecutionTrace, lres.ExecutionTrace); err != nil {
-		return fmt.Errorf("%+v != %+v", vres.ExecutionTrace, lres.ExecutionTrace)
+
+	return check(vres.ExecutionTrace, lres.ExecutionTrace)
+}
+
+func check(vTrace types.ExecutionTrace, lTrace ltypes.ExecutionTrace) error {
+	if vTrace.Error != lTrace.Error {
+		return fmt.Errorf("error not match %s != %s", vTrace.Error, lTrace.Error)
+	}
+	if vTrace.Msg.Cid() != lTrace.Msg.Cid() {
+		return fmt.Errorf("cid not match %v != %v", vTrace.Msg, lTrace.Msg)
+	}
+	if err := checkByJSON(vTrace.MsgRct, lTrace.MsgRct); err != nil {
+		return fmt.Errorf("message receipt %v", err)
+	}
+	if err := checkByJSON(vTrace.GasCharges, lTrace.GasCharges); err != nil {
+		return fmt.Errorf("gas charges %v", err)
+	}
+	if len(vTrace.Subcalls) != len(lTrace.Subcalls) {
+		return fmt.Errorf("subcalls %d != %d", len(vTrace.Subcalls), len(lTrace.Subcalls))
+	}
+
+	for i := range vTrace.Subcalls {
+		if err := check(vTrace.Subcalls[i], lTrace.Subcalls[i]); err != nil {
+			return fmt.Errorf("subcalls %v", err)
+		}
 	}
 
 	return nil
@@ -147,16 +198,6 @@ func bigIntEqual(a, b *big.Int) error {
 }
 
 func equal(a, b interface{}) bool {
-	abytes, ok := a.([]byte)
-	bbytes, ok2 := b.([]byte)
-	if ok || ok2 {
-		if ok && ok2 {
-			return bytes.Equal(abytes, bbytes)
-		} else {
-			return false
-		}
-	}
-
 	av := reflect.ValueOf(a)
 	bv := reflect.ValueOf(b)
 
@@ -262,7 +303,7 @@ func resultCheckWithInvocResult(msg cid.Cid, o1, o2 interface{}) error {
 	r2, _ := o2.(*lapi.InvocResult)
 
 	if err := checkInvocResult(r1, r2); err != nil {
-		return fmt.Errorf("msg %s, \nerror: %v", msg, err)
+		return fmt.Errorf("msg %s, %v", msg, err)
 	}
 
 	return nil
