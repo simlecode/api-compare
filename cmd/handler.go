@@ -114,12 +114,12 @@ func (h *handler) call(r *req) error {
 	wg.Wait()
 
 	if len(vRes) == 0 {
-		return h.handleError(vRes[0], lRes[0])
+		return appendParams(h.handleError(vRes[0], lRes[0]), inParams)
 	}
 
 	if len(vRes) == 2 {
 		if err := h.handleError(vRes[1], lRes[1]); err != nil && !r.expectCallAPIError {
-			return err
+			return appendParams(err, inParams)
 		}
 	}
 	logrus.Tracef("call %s result: \n%+v\n%+v", r.methodName, vRes[0].Interface(), lRes[0].Interface())
@@ -185,6 +185,19 @@ func (h *handler) handleError(vErr, lErr reflect.Value) error {
 	}
 
 	return nil
+}
+
+func appendParams(err error, params []reflect.Value) error {
+	str := "params:"
+	// skip context
+	for i := 1; i < len(params); i++ {
+		str += fmt.Sprintf("%d:%v", i, params[i])
+		if i < len(params)-1 {
+			str += ", "
+		}
+	}
+
+	return fmt.Errorf("%v, %s", err, str)
 }
 
 func (h *handler) send(r *req) {
